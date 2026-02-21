@@ -48,6 +48,38 @@
     .control-title { font-size: 12px; font-weight: 600; margin: 4px 0 8px; }
     .btn { border: 1px solid #bbb; background: #f7f7f7; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
     .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .text-input {
+      border: 1px solid #bbb;
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 12px;
+      font-family: ui-monospace, Menlo, monospace;
+      min-width: 120px;
+    }
+    .number-input {
+      border: 1px solid #bbb;
+      border-radius: 6px;
+      padding: 4px 8px;
+      font-size: 12px;
+      width: 72px;
+    }
+    .control-config {
+      display: grid;
+      grid-template-columns: 58px 1fr 44px auto auto;
+      gap: 6px;
+      align-items: center;
+      margin-bottom: 10px;
+      font-size: 11px;
+    }
+    .control-config label { white-space: nowrap; }
+    .control-hint {
+      font-size: 11px;
+      color: #555;
+      margin: -4px 0 10px;
+    }
+    .row.is-inactive {
+      opacity: 0.42;
+    }
     .axis-labels {
       position: absolute;
       left: 10px;
@@ -140,6 +172,14 @@
     <div class="controls">
       <button id="reset-controls" class="btn" type="button" disabled>Loading…</button>
     </div>
+    <div class="control-config">
+      <label for="use-dof-input">use_dof</label>
+      <input id="use-dof-input" class="text-input" type="text" value="0-9,10-16,30-34" spellcheck="false" />
+      <label for="nkeep-input">nkeep</label>
+      <input id="nkeep-input" class="number-input" type="number" min="1" step="1" value="12" />
+      <button id="apply-modes" class="btn" type="button" disabled>Apply</button>
+    </div>
+    <div class="control-hint">use_dof format: <span>0-9,10-16,30-34</span>. Change inputs, then click Apply (or press Enter).</div>
     <div class="slider-columns">
       <div class="control-column">
         <div class="control-title">Original controls</div>
@@ -168,6 +208,7 @@
     </div>
   </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/numeric/1.2.6/numeric.min.js"></script>
 <script type="module" src="./main.js"></script>
 </body>
 </html>

@@ -4,6 +4,10 @@ let N;
 const WORLD_RADIUS = 2;
 const VIEW_PADDING = 0.9;
 const VALUE_DECIMALS = 3;
+const TARGET_VMODE_RMS_WORLD_UNITS = 0.12;
+const MODE_RANGE_MIN = 0.01;
+const MODE_RANGE_MAX = 100.0;
+const MODE_RANGE_SAMPLE_COUNT = 6000;
 const CONTROL_NAMES = [
     'M2 dz [µm]', 'M2 dx [µm]', 'M2 dy [µm]', 'M2 rx [arcsec]', 'M2 ry [arcsec]',
     'Cam dz [µm]', 'Cam dx [µm]', 'Cam dy [µm]', 'Cam rx [arcsec]', 'Cam ry [arcsec]',
@@ -42,6 +46,11 @@ let comboMatrix = new Float32Array(0);
 let comboLabels = [];
 let comboRanges = [];
 let comboSteps = [];
+let activeDofs = new Set();
+let dofRanges = [];
+let dofPower = [];
+let defaultUseDof = [];
+let defaultNkeep = null;
 let x0, y0, Sx, Sy;
 let modelRadius = WORLD_RADIUS;
 let positions = new Float32Array(0);
@@ -77,78 +86,197 @@ function clampControlValue(index, value) {
   return Math.max(-range, Math.min(range, value));
 }
 
-async function loadComboMatrixJson(url, expectedControlCount) {
-  const response = await fetch(url);
-  if (!response.ok) {
-    throw new Error(`Failed to load ${url}: ${response.status} ${response.statusText}`);
+function parseUseDofString(text, controlCount) {
+  const result = [];
+  const seen = new Set();
+  const cleaned = (text ?? '').trim();
+  if (!cleaned) {
+    throw new Error('use_dof cannot be empty');
   }
-
-  const payload = await response.json();
-  const comboCount = Number(payload.combo_count);
-  const controlCount = Number(payload.control_count);
-  const matrix = payload.matrix;
-  const labels = payload.labels;
-  const ranges = payload.ranges;
-  const steps = payload.steps;
-
-  if (!Number.isInteger(comboCount) || comboCount <= 0) {
-    throw new Error('vmode json must contain a positive integer combo_count');
-  }
-  if (!Number.isInteger(controlCount) || controlCount <= 0) {
-    throw new Error('vmode json must contain a positive integer control_count');
-  }
-  if (controlCount !== expectedControlCount) {
-    throw new Error(`vmode control_count (${controlCount}) does not match model K (${expectedControlCount})`);
-  }
-  if (!Array.isArray(matrix) || matrix.length !== comboCount) {
-    throw new Error('vmode matrix must be an array with one row per combo mode');
-  }
-
-  const controlMajor = new Float32Array(controlCount * comboCount);
-  for (let j = 0; j < comboCount; j++) {
-    const row = matrix[j];
-    if (!Array.isArray(row) || row.length !== controlCount) {
-      throw new Error(`vmode row ${j} must contain exactly ${controlCount} values`);
-    }
-    for (let k = 0; k < controlCount; k++) {
-      const value = Number(row[k]);
-      if (!Number.isFinite(value)) {
-        throw new Error(`vmode value at combo ${j}, control ${k} is not a finite number`);
+  for (const rawPart of cleaned.split(',')) {
+    const part = rawPart.trim();
+    if (!part) continue;
+    if (part.includes('-')) {
+      const pieces = part.split('-').map((v) => v.trim());
+      if (pieces.length !== 2) {
+        throw new Error(`Invalid use_dof range '${part}'`);
       }
-      controlMajor[k * comboCount + j] = value;
+      const start = Number(pieces[0]);
+      const end = Number(pieces[1]);
+      if (!Number.isInteger(start) || !Number.isInteger(end)) {
+        throw new Error(`Invalid use_dof range '${part}'`);
+      }
+      const lo = Math.min(start, end);
+      const hi = Math.max(start, end);
+      for (let i = lo; i <= hi; i++) {
+        if (i < 0 || i >= controlCount) {
+          throw new Error(`use_dof index ${i} out of bounds [0, ${controlCount - 1}]`);
+        }
+        if (!seen.has(i)) {
+          seen.add(i);
+          result.push(i);
+        }
+      }
+    } else {
+      const value = Number(part);
+      if (!Number.isInteger(value)) {
+        throw new Error(`Invalid use_dof index '${part}'`);
+      }
+      if (value < 0 || value >= controlCount) {
+        throw new Error(`use_dof index ${value} out of bounds [0, ${controlCount - 1}]`);
+      }
+      if (!seen.has(value)) {
+        seen.add(value);
+        result.push(value);
+      }
+    }
+  }
+  if (result.length === 0) {
+    throw new Error('use_dof must include at least one index');
+  }
+  result.sort((a, b) => a - b);
+  return result;
+}
+
+function computeComboConfigFromSelection(selectedDofs, requestedNkeep) {
+  if (!Sx || !Sy || !Number.isInteger(N) || N <= 0) {
+    throw new Error('Sensitivity arrays are not loaded');
+  }
+  if (!window.numeric || typeof window.numeric.svd !== 'function') {
+    throw new Error('numeric.js SVD is unavailable');
+  }
+  const localDofCount = selectedDofs.length;
+  const nkeep = Math.max(1, Math.min(requestedNkeep, localDofCount));
+
+  const weights = new Float64Array(localDofCount);
+  for (let localIndex = 0; localIndex < localDofCount; localIndex++) {
+    const dof = selectedDofs[localIndex];
+    weights[localIndex] = (Number(dofRanges[dof]) || 1) * (Number(dofPower[dof]) || 1);
+  }
+
+  const gram = Array.from({length: localDofCount}, () => new Array(localDofCount).fill(0));
+  for (let a = 0; a < localDofCount; a++) {
+    const dofA = selectedDofs[a];
+    const offA = dofA * N;
+    const wa = weights[a];
+    for (let b = a; b < localDofCount; b++) {
+      const dofB = selectedDofs[b];
+      const offB = dofB * N;
+      const wb = weights[b];
+      let dot = 0;
+      for (let i = 0; i < N; i++) {
+        const sxA = Sx[offA + i];
+        const sxB = Sx[offB + i];
+        if (Number.isFinite(sxA) && Number.isFinite(sxB)) {
+          dot += sxA * sxB;
+        }
+        const syA = Sy[offA + i];
+        const syB = Sy[offB + i];
+        if (Number.isFinite(syA) && Number.isFinite(syB)) {
+          dot += syA * syB;
+        }
+      }
+      const value = dot * wa * wb;
+      gram[a][b] = value;
+      gram[b][a] = value;
     }
   }
 
-  const resolvedLabels = new Array(comboCount);
-  const resolvedRanges = new Array(comboCount);
-  const resolvedSteps = new Array(comboCount);
+  const svd = window.numeric.svd(gram);
+  const v = svd?.V;
+  if (!Array.isArray(v) || v.length !== localDofCount) {
+    throw new Error('numeric.svd returned an unexpected V matrix');
+  }
 
-  for (let j = 0; j < comboCount; j++) {
-    const label = Array.isArray(labels) ? labels[j] : undefined;
-    resolvedLabels[j] = typeof label === 'string' && label.trim().length > 0
-      ? label
-      : `Vmode ${j + 1}`;
+  const controlMajor = new Float32Array(K * nkeep);
+  const localModeVectors = Array.from({length: nkeep}, () => new Float64Array(localDofCount));
+  for (let modeIndex = 0; modeIndex < nkeep; modeIndex++) {
+    for (let localIndex = 0; localIndex < localDofCount; localIndex++) {
+      const dof = selectedDofs[localIndex];
+      const coeff = Number(v[localIndex][modeIndex]);
+      localModeVectors[modeIndex][localIndex] = coeff;
+      controlMajor[dof * nkeep + modeIndex] = coeff;
+    }
+  }
 
-    const rangeCandidate = Array.isArray(ranges) ? Number(ranges[j]) : NaN;
-    const range = Number.isFinite(rangeCandidate) && rangeCandidate > 0
-      ? rangeCandidate
-      : DEFAULT_COMBO_RANGE;
-    resolvedRanges[j] = range;
+  const sampleStride = Math.max(1, Math.floor(N / MODE_RANGE_SAMPLE_COUNT));
+  const ranges = new Array(nkeep);
+  const steps = new Array(nkeep);
 
-    const stepCandidate = Array.isArray(steps) ? Number(steps[j]) : NaN;
-    const step = Number.isFinite(stepCandidate) && stepCandidate > 0
-      ? stepCandidate
-      : Math.max(range / 200, DEFAULT_COMBO_STEP);
-    resolvedSteps[j] = step;
+  for (let modeIndex = 0; modeIndex < nkeep; modeIndex++) {
+    const modeVec = localModeVectors[modeIndex];
+    let sumR2 = 0;
+    let sampleCount = 0;
+
+    for (let i = 0; i < N; i += sampleStride) {
+      let dx = 0;
+      let dy = 0;
+
+      for (let localIndex = 0; localIndex < localDofCount; localIndex++) {
+        const coeff = modeVec[localIndex];
+        if (coeff === 0) continue;
+        const dof = selectedDofs[localIndex];
+        const off = dof * N + i;
+
+        const sx = Sx[off];
+        if (Number.isFinite(sx)) dx += sx * coeff;
+
+        const sy = Sy[off];
+        if (Number.isFinite(sy)) dy += sy * coeff;
+      }
+
+      sumR2 += dx * dx + dy * dy;
+      sampleCount++;
+    }
+
+    const rms = Math.sqrt(sumR2 / Math.max(1, sampleCount));
+    const rawRange = TARGET_VMODE_RMS_WORLD_UNITS / Math.max(rms, 1e-12);
+    const range = Math.max(MODE_RANGE_MIN, Math.min(MODE_RANGE_MAX, rawRange));
+    ranges[modeIndex] = Number(range.toFixed(4));
+    steps[modeIndex] = Number(Math.max(range / 200, 0.001).toFixed(5));
   }
 
   return {
-    comboCount,
+    comboCount: nkeep,
     controlMajor,
-    labels: resolvedLabels,
-    ranges: resolvedRanges,
-    steps: resolvedSteps
+    labels: Array.from({length: nkeep}, (_, i) => `Vmode ${i + 1}`),
+    ranges,
+    steps
   };
+}
+
+function setDofActivity(selectedDofs) {
+  activeDofs = new Set(selectedDofs);
+  for (let k = 0; k < K; k++) {
+    if (!activeDofs.has(k)) {
+      pBase[k] = 0;
+      p[k] = 0;
+    }
+  }
+}
+
+function applyModeSelection(selectedDofs, requestedNkeep) {
+  const comboConfig = computeComboConfigFromSelection(selectedDofs, requestedNkeep);
+  setDofActivity(selectedDofs);
+  comboCount = comboConfig.comboCount;
+  comboLabels = comboConfig.labels ?? [];
+  comboRanges = comboConfig.ranges ?? [];
+  comboSteps = comboConfig.steps ?? [];
+  combo = new Float32Array(comboCount);
+  comboMatrix = comboConfig.controlMajor;
+  buildSliders();
+  resetControls();
+}
+
+function applyModeSelectionFromInputs() {
+  if (!Sx || !Sy) return;
+  const useDofText = useDofInput?.value ?? '';
+  const selectedDofs = parseUseDofString(useDofText, K);
+  const requestedNkeep = Number(nkeepInput?.value ?? 1);
+  if (!Number.isInteger(requestedNkeep) || requestedNkeep <= 0) {
+    throw new Error('nkeep must be a positive integer');
+  }
+  applyModeSelection(selectedDofs, requestedNkeep);
 }
 
 function formatControlValue(value) {
@@ -167,8 +295,18 @@ async function loadPackedModel(metaUrl, modelUrl) {
 
   const n = Number(meta.N);
   const k = Number(meta.K);
+  const metaDofRanges = meta.dof_ranges;
+  const metaDofPower = meta.dof_power;
+  const metaDefaultUseDof = meta.default_use_dof;
+  const metaDefaultNkeep = Number(meta.default_nkeep);
   if (!Number.isInteger(n) || n <= 0 || !Number.isInteger(k) || k <= 0) {
     throw new Error('Metadata must contain positive integer N and K');
+  }
+  if (!Array.isArray(metaDofRanges) || metaDofRanges.length !== k) {
+    throw new Error('Metadata must contain dof_ranges with length K');
+  }
+  if (!Array.isArray(metaDofPower) || metaDofPower.length !== k) {
+    throw new Error('Metadata must contain dof_power with length K');
   }
 
   const initSpec = meta.layout?.init_xy;
@@ -211,7 +349,17 @@ async function loadPackedModel(metaUrl, modelUrl) {
   const loadedSx = new Float32Array(packed.subarray(sxOffset, sxOffset + sxLength));
   const loadedSy = new Float32Array(packed.subarray(syOffset, syOffset + syLength));
 
-  return {x, y, sx: loadedSx, sy: loadedSy, k};
+  return {
+    x,
+    y,
+    sx: loadedSx,
+    sy: loadedSy,
+    k,
+    dofRanges: metaDofRanges.map((v) => Number(v)),
+    dofPower: metaDofPower.map((v) => Number(v)),
+    defaultUseDof: Array.isArray(metaDefaultUseDof) ? metaDefaultUseDof.map((v) => Number(v)) : [],
+    defaultNkeep: Number.isInteger(metaDefaultNkeep) && metaDefaultNkeep > 0 ? metaDefaultNkeep : null
+  };
 }
 
 async function fetchArrayBufferWithProgress(url, onProgress) {
@@ -253,26 +401,20 @@ async function fetchArrayBufferWithProgress(url, onProgress) {
   return merged.buffer;
 }
 
-function initModel(initialX, initialY, initialSx, initialSy, loadedK, loadedComboConfig) {
+function initModel(initialX, initialY, initialSx, initialSy, loadedK) {
   N = initialX.length;
   if (Number.isInteger(loadedK) && loadedK > 0) {
     K = loadedK;
   }
-  if (!loadedComboConfig || !Number.isInteger(loadedComboConfig.comboCount) || loadedComboConfig.comboCount <= 0) {
-    throw new Error('Missing or invalid combo metadata from vmode.json');
-  }
-
-  comboCount = loadedComboConfig.comboCount;
-  comboLabels = loadedComboConfig.labels ?? [];
-  comboRanges = loadedComboConfig.ranges ?? [];
-  comboSteps = loadedComboConfig.steps ?? [];
   p = new Float32Array(K);
   pBase = new Float32Array(K);
-  combo = new Float32Array(comboCount);
-  if (!loadedComboConfig.controlMajor || loadedComboConfig.controlMajor.length !== K * comboCount) {
-    throw new Error('Missing or invalid combo matrix from vmode.json');
-  }
-  comboMatrix = loadedComboConfig.controlMajor;
+  comboCount = 0;
+  combo = new Float32Array(0);
+  comboMatrix = new Float32Array(0);
+  comboLabels = [];
+  comboRanges = [];
+  comboSteps = [];
+  activeDofs = new Set(Array.from({length: K}, (_, i) => i));
   x0 = initialX;
   y0 = initialY;
   positions = new Float32Array(N * 2);
@@ -313,6 +455,9 @@ function updatePositions() {
 const vis = document.getElementById('vis');
 const canvas = document.getElementById('deck-canvas');
 const resetControlsBtn = document.getElementById('reset-controls');
+const useDofInput = document.getElementById('use-dof-input');
+const nkeepInput = document.getElementById('nkeep-input');
+const applyModesBtn = document.getElementById('apply-modes');
 const comboSlidersRoot = document.getElementById('combo-sliders');
 const mouseCoordsEl = document.getElementById('mouse-coords');
 const scaleBarLineEl = document.getElementById('scale-bar-line');
@@ -330,6 +475,7 @@ let syncingBaseSliderUI = false;
 let currentViewState = { target: [0, 0, 0], zoom: 0 };
 
 function getComboContributionForControl(index) {
+  if (comboCount === 0) return 0;
   let value = 0;
   const rowOffset = index * comboCount;
   for (let j = 0; j < comboCount; j++) {
@@ -361,6 +507,7 @@ function setControlsReady(ready) {
   if (!resetControlsBtn) return;
   resetControlsBtn.disabled = !ready;
   resetControlsBtn.textContent = ready ? 'Reset (r)' : 'Loading…';
+  if (applyModesBtn) applyModesBtn.disabled = !ready;
 }
 
 function formatMiB(bytes) {
@@ -517,6 +664,10 @@ function buildSliders() {
     const spec = getControlSpec(k);
     const row = document.createElement('div');
     row.className = 'row';
+    const isActive = activeDofs.has(k);
+    if (!isActive) {
+      row.classList.add('is-inactive');
+    }
 
     const label = document.createElement('label');
     label.textContent = spec.label;
@@ -527,6 +678,7 @@ function buildSliders() {
     input.max = String(spec.range);
     input.step = String(spec.step);
     input.value = '0';
+    input.disabled = !isActive;
 
     const val = document.createElement('span');
     val.textContent = formatControlValue(0);
@@ -605,11 +757,31 @@ async function start() {
   setControlsReady(false);
   updateLoadingProgress(0, NaN, false);
   const model = await loadPackedModel('./model_meta.json', './model.f32');
-  const loadedComboConfig = await loadComboMatrixJson('./vmode.json', model.k);
+  dofRanges = model.dofRanges;
+  dofPower = model.dofPower;
+  defaultUseDof = model.defaultUseDof;
+  defaultNkeep = model.defaultNkeep;
 
-  initModel(model.x, model.y, model.sx, model.sy, model.k, loadedComboConfig);
+  initModel(model.x, model.y, model.sx, model.sy, model.k);
+  if (useDofInput) {
+    const defaults = defaultUseDof.length
+      ? defaultUseDof.join(',')
+      : '0-9,10-16,30-34';
+    useDofInput.value = defaults;
+  }
+  if (nkeepInput) {
+    const initialNkeep = Number.isInteger(defaultNkeep)
+      ? defaultNkeep
+      : Math.min(12, K);
+    nkeepInput.value = String(initialNkeep);
+  }
+
   buildSliders();
-  recomputeControls(true);
+  try {
+    applyModeSelectionFromInputs();
+  } catch (error) {
+    showLoadingError(`Initial mode setup failed: ${error.message}`);
+  }
   resizeDeck();
   updatePositions();
   posVersion++;
@@ -627,6 +799,36 @@ window.addEventListener('resize', () => { resizeDeck(); render(); });
 
 if (resetControlsBtn) {
   resetControlsBtn.addEventListener('click', resetControls);
+}
+
+if (applyModesBtn) {
+  applyModesBtn.addEventListener('click', () => {
+    try {
+      applyModeSelectionFromInputs();
+      requestUpdate();
+    } catch (error) {
+      showLoadingError(`Mode update failed: ${error.message}`);
+    }
+  });
+}
+
+function handleModeInputEnter(event) {
+  if (event.key !== 'Enter') return;
+  event.preventDefault();
+  try {
+    applyModeSelectionFromInputs();
+    requestUpdate();
+  } catch (error) {
+    showLoadingError(`Mode update failed: ${error.message}`);
+  }
+}
+
+if (useDofInput) {
+  useDofInput.addEventListener('keydown', handleModeInputEnter);
+}
+
+if (nkeepInput) {
+  nkeepInput.addEventListener('keydown', handleModeInputEnter);
 }
 
 vis.addEventListener('mousemove', updateMouseCoords);

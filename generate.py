@@ -52,6 +52,10 @@ meta = {
     "dtype": "float32",
     "N": int(N),
     "K": int(K),
+    "dof_ranges": ssh._ranges.tolist(),
+    "dof_power": ssh._moments_power.tolist(),
+    "default_use_dof": [int(v) for v in ssh.use_dof.tolist()],
+    "default_nkeep": int(ssh.nkeep),
     "layout": {
         "init_xy": {"offset_f32": 0, "length_f32": int(2 * N), "encoding": "xy_interleaved"},
         "Sx": {"offset_f32": int(2 * N), "length_f32": int(K * N), "shape": [int(K), int(N)], "order": "C"},
@@ -66,16 +70,3 @@ Vmatrix = np.zeros((ssh.nkeep, ssh.n_dof), dtype=np.float32)
 for i, dof in enumerate(ssh.use_dof):
     Vmatrix[:, dof] = Vh[:ssh.nkeep, i]
 print(Vmatrix.shape) # (12, 50)
-
-vmode_payload = {
-    "version": 1,
-    "combo_count": int(Vmatrix.shape[0]),
-    "control_count": int(Vmatrix.shape[1]),
-    "layout": "combo_by_control",
-    "labels": [f"Vmode {i + 1}" for i in range(Vmatrix.shape[0])],
-    "ranges": [6.0, 1, 1, 1, 1, 25, 25, 2, 2, 1, 1, 0.5],
-    "steps": [0.01 for _ in range(Vmatrix.shape[0])],
-    "matrix": Vmatrix.tolist(),
-}
-with open("vmode.json", "w") as f:
-    json.dump(vmode_payload, f, indent=2)
