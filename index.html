@@ -1,0 +1,161 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Rubin Observatory Optical Sensitivity Model</title>
+  <script src="https://unpkg.com/deck.gl@9.1.13/dist.min.js"></script>
+  <style>
+    html, body { margin: 0; height: 100%; }
+    body { display: grid; grid-template-columns: 380px 1fr; font-family: system-ui, sans-serif; }
+    #ui  { position: relative; z-index: 10; padding: 12px; border-right: 1px solid #ddd; background: #fff; overflow: auto; }
+    #vis {
+      --grid-pitch-px: 24px;
+      --grid-major-pitch-px: 120px;
+      --grid-offset-x: 0px;
+      --grid-offset-y: 0px;
+      --grid-major-offset-x: 0px;
+      --grid-major-offset-y: 0px;
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #0b0f14;
+      background-image:
+        linear-gradient(to right, rgba(122, 178, 255, 0.05) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(122, 178, 255, 0.05) 1px, transparent 1px),
+        linear-gradient(to right, rgba(122, 178, 255, 0.04) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(122, 178, 255, 0.04) 1px, transparent 1px);
+      background-size:
+        var(--grid-major-pitch-px) var(--grid-major-pitch-px),
+        var(--grid-major-pitch-px) var(--grid-major-pitch-px),
+        var(--grid-pitch-px) var(--grid-pitch-px),
+        var(--grid-pitch-px) var(--grid-pitch-px);
+      background-position:
+        var(--grid-major-offset-x) var(--grid-major-offset-y),
+        var(--grid-major-offset-x) var(--grid-major-offset-y),
+        var(--grid-offset-x) var(--grid-offset-y),
+        var(--grid-offset-x) var(--grid-offset-y);
+    }
+    #vis canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
+    .row { display: grid; grid-template-columns: 135px 1fr 72px; gap: 6px; align-items: center; margin: 3px 0; }
+    .row label { white-space: nowrap; font-size: 11px; }
+    .row span { text-align: right; font-family: ui-monospace, Menlo, monospace; }
+    .row input[type="range"] { margin: 0; }
+    .controls { display: flex; gap: 8px; margin-bottom: 10px; }
+    .btn { border: 1px solid #bbb; background: #f7f7f7; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+    .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .axis-labels {
+      position: absolute;
+      left: 10px;
+      bottom: 10px;
+      z-index: 5;
+      color: #d7e7ff;
+      font-size: 12px;
+      font-family: ui-monospace, Menlo, monospace;
+      pointer-events: none;
+      opacity: 0.85;
+      line-height: 1.2;
+    }
+    .mouse-coords {
+      position: absolute;
+      right: 10px;
+      top: 10px;
+      z-index: 5;
+      color: #d7e7ff;
+      font-size: 12px;
+      font-family: ui-monospace, Menlo, monospace;
+      pointer-events: none;
+      opacity: 0.9;
+    }
+    .scale-bar {
+      position: absolute;
+      left: 10px;
+      top: 10px;
+      z-index: 5;
+      color: #d7e7ff;
+      font-size: 12px;
+      font-family: ui-monospace, Menlo, monospace;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 4px;
+      opacity: 0.9;
+    }
+    .scale-bar-line {
+      height: 0;
+      border-top: 2px solid #d7e7ff;
+      width: 24px;
+    }
+    .loading-overlay {
+      position: absolute;
+      inset: 0;
+      z-index: 8;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(11, 15, 20, 0.82);
+      color: #e5edf8;
+      font-family: ui-monospace, Menlo, monospace;
+      pointer-events: none;
+    }
+    .loading-panel {
+      width: min(420px, calc(100% - 48px));
+      display: grid;
+      gap: 8px;
+    }
+    .loading-title {
+      font-size: 12px;
+      letter-spacing: 0.02em;
+    }
+    .loading-track {
+      height: 8px;
+      border: 1px solid rgba(229, 237, 248, 0.35);
+      border-radius: 999px;
+      overflow: hidden;
+      background: rgba(255, 255, 255, 0.06);
+    }
+    .loading-fill {
+      height: 100%;
+      width: 0%;
+      background: #7ab2ff;
+      transition: width 100ms linear;
+    }
+    .loading-text {
+      font-size: 11px;
+      opacity: 0.92;
+    }
+    .is-hidden {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="ui">
+    <div style="font-weight:600; margin-bottom:6px;">Rubin Observatory Optical Sensitivity Model</div>
+    <div class="controls">
+      <button id="reset-controls" class="btn" type="button" disabled>Loading…</button>
+    </div>
+    <div id="sliders"></div>
+  </div>
+  <div id="vis">
+    <canvas id="deck-canvas"></canvas>
+    <div id="loading-overlay" class="loading-overlay" aria-live="polite">
+      <div class="loading-panel">
+        <div class="loading-title">Loading model data…</div>
+        <div class="loading-track"><div id="loading-fill" class="loading-fill"></div></div>
+        <div id="loading-text" class="loading-text">Starting download…</div>
+      </div>
+    </div>
+    <div class="axis-labels" aria-hidden="true">y ↑<br>x →</div>
+    <div id="mouse-coords" class="mouse-coords" aria-hidden="true">x: ---, y: ---</div>
+    <div class="scale-bar" aria-hidden="true">
+      <div id="scale-bar-line" class="scale-bar-line"></div>
+      <div>1 arcsec</div>
+    </div>
+  </div>
+
+<script type="module" src="./main.js"></script>
+</body>
+</html>
