@@ -6,7 +6,7 @@
   <script src="https://unpkg.com/deck.gl@9.1.13/dist.min.js"></script>
   <style>
     html, body { margin: 0; height: 100%; }
-    body { display: grid; grid-template-columns: 380px 1fr; font-family: system-ui, sans-serif; }
+    body { display: grid; grid-template-columns: minmax(640px, 52vw) 1fr; font-family: system-ui, sans-serif; }
     #ui  { position: relative; z-index: 10; padding: 12px; border-right: 1px solid #ddd; background: #fff; overflow: auto; }
     #vis {
       --grid-pitch-px: 24px;
@@ -43,6 +43,9 @@
     .row span { text-align: right; font-family: ui-monospace, Menlo, monospace; }
     .row input[type="range"] { margin: 0; }
     .controls { display: flex; gap: 8px; margin-bottom: 10px; }
+    .slider-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-height: 0; }
+    .control-column { min-width: 0; }
+    .control-title { font-size: 12px; font-weight: 600; margin: 4px 0 8px; }
     .btn { border: 1px solid #bbb; background: #f7f7f7; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
     .btn:disabled { opacity: 0.55; cursor: not-allowed; }
     .axis-labels {
@@ -137,7 +140,16 @@
     <div class="controls">
       <button id="reset-controls" class="btn" type="button" disabled>Loading…</button>
     </div>
-    <div id="sliders"></div>
+    <div class="slider-columns">
+      <div class="control-column">
+        <div class="control-title">Original controls</div>
+        <div id="sliders"></div>
+      </div>
+      <div class="control-column">
+        <div class="control-title">Linear combinations</div>
+        <div id="combo-sliders"></div>
+      </div>
+    </div>
   </div>
   <div id="vis">
     <canvas id="deck-canvas"></canvas>

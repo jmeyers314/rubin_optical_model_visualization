@@ -31,8 +31,17 @@ const CONTROL_RANGES = [
 ];
 
 let K = CONTROL_NAMES.length;
+const DEFAULT_COMBO_RANGE = 1.0;
+const DEFAULT_COMBO_STEP = 0.01;
 
 let p = new Float32Array(K);
+let pBase = new Float32Array(K);
+let comboCount = 0;
+let combo = new Float32Array(0);
+let comboMatrix = new Float32Array(0);
+let comboLabels = [];
+let comboRanges = [];
+let comboSteps = [];
 let x0, y0, Sx, Sy;
 let modelRadius = WORLD_RADIUS;
 let positions = new Float32Array(0);
@@ -52,6 +61,94 @@ function getControlSpec(index) {
   const range = CONTROL_RANGES[index] ?? 1;
   const step = Math.max(range / 200, 1e-4);
   return {label, range, step};
+}
+
+function getComboSpec(index) {
+  const range = comboRanges[index] ?? DEFAULT_COMBO_RANGE;
+  return {
+    label: comboLabels[index] ?? `Vmode ${index + 1}`,
+    range,
+    step: comboSteps[index] ?? Math.max(range / 200, DEFAULT_COMBO_STEP)
+  };
+}
+
+function clampControlValue(index, value) {
+  const range = CONTROL_RANGES[index] ?? Infinity;
+  return Math.max(-range, Math.min(range, value));
+}
+
+async function loadComboMatrixJson(url, expectedControlCount) {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Failed to load ${url}: ${response.status} ${response.statusText}`);
+  }
+
+  const payload = await response.json();
+  const comboCount = Number(payload.combo_count);
+  const controlCount = Number(payload.control_count);
+  const matrix = payload.matrix;
+  const labels = payload.labels;
+  const ranges = payload.ranges;
+  const steps = payload.steps;
+
+  if (!Number.isInteger(comboCount) || comboCount <= 0) {
+    throw new Error('vmode json must contain a positive integer combo_count');
+  }
+  if (!Number.isInteger(controlCount) || controlCount <= 0) {
+    throw new Error('vmode json must contain a positive integer control_count');
+  }
+  if (controlCount !== expectedControlCount) {
+    throw new Error(`vmode control_count (${controlCount}) does not match model K (${expectedControlCount})`);
+  }
+  if (!Array.isArray(matrix) || matrix.length !== comboCount) {
+    throw new Error('vmode matrix must be an array with one row per combo mode');
+  }
+
+  const controlMajor = new Float32Array(controlCount * comboCount);
+  for (let j = 0; j < comboCount; j++) {
+    const row = matrix[j];
+    if (!Array.isArray(row) || row.length !== controlCount) {
+      throw new Error(`vmode row ${j} must contain exactly ${controlCount} values`);
+    }
+    for (let k = 0; k < controlCount; k++) {
+      const value = Number(row[k]);
+      if (!Number.isFinite(value)) {
+        throw new Error(`vmode value at combo ${j}, control ${k} is not a finite number`);
+      }
+      controlMajor[k * comboCount + j] = value;
+    }
+  }
+
+  const resolvedLabels = new Array(comboCount);
+  const resolvedRanges = new Array(comboCount);
+  const resolvedSteps = new Array(comboCount);
+
+  for (let j = 0; j < comboCount; j++) {
+    const label = Array.isArray(labels) ? labels[j] : undefined;
+    resolvedLabels[j] = typeof label === 'string' && label.trim().length > 0
+      ? label
+      : `Vmode ${j + 1}`;
+
+    const rangeCandidate = Array.isArray(ranges) ? Number(ranges[j]) : NaN;
+    const range = Number.isFinite(rangeCandidate) && rangeCandidate > 0
+      ? rangeCandidate
+      : DEFAULT_COMBO_RANGE;
+    resolvedRanges[j] = range;
+
+    const stepCandidate = Array.isArray(steps) ? Number(steps[j]) : NaN;
+    const step = Number.isFinite(stepCandidate) && stepCandidate > 0
+      ? stepCandidate
+      : Math.max(range / 200, DEFAULT_COMBO_STEP);
+    resolvedSteps[j] = step;
+  }
+
+  return {
+    comboCount,
+    controlMajor,
+    labels: resolvedLabels,
+    ranges: resolvedRanges,
+    steps: resolvedSteps
+  };
 }
 
 function formatControlValue(value) {
@@ -156,12 +253,26 @@ async function fetchArrayBufferWithProgress(url, onProgress) {
   return merged.buffer;
 }
 
-function initModel(initialX, initialY, initialSx, initialSy, loadedK) {
+function initModel(initialX, initialY, initialSx, initialSy, loadedK, loadedComboConfig) {
   N = initialX.length;
   if (Number.isInteger(loadedK) && loadedK > 0) {
     K = loadedK;
   }
+  if (!loadedComboConfig || !Number.isInteger(loadedComboConfig.comboCount) || loadedComboConfig.comboCount <= 0) {
+    throw new Error('Missing or invalid combo metadata from vmode.json');
+  }
+
+  comboCount = loadedComboConfig.comboCount;
+  comboLabels = loadedComboConfig.labels ?? [];
+  comboRanges = loadedComboConfig.ranges ?? [];
+  comboSteps = loadedComboConfig.steps ?? [];
   p = new Float32Array(K);
+  pBase = new Float32Array(K);
+  combo = new Float32Array(comboCount);
+  if (!loadedComboConfig.controlMajor || loadedComboConfig.controlMajor.length !== K * comboCount) {
+    throw new Error('Missing or invalid combo matrix from vmode.json');
+  }
+  comboMatrix = loadedComboConfig.controlMajor;
   x0 = initialX;
   y0 = initialY;
   positions = new Float32Array(N * 2);
@@ -202,6 +313,7 @@ function updatePositions() {
 const vis = document.getElementById('vis');
 const canvas = document.getElementById('deck-canvas');
 const resetControlsBtn = document.getElementById('reset-controls');
+const comboSlidersRoot = document.getElementById('combo-sliders');
 const mouseCoordsEl = document.getElementById('mouse-coords');
 const scaleBarLineEl = document.getElementById('scale-bar-line');
 const loadingOverlayEl = document.getElementById('loading-overlay');
@@ -212,7 +324,38 @@ const GRID_PITCH_WORLD_UNITS = 0.048;
 const GRID_MAJOR_EVERY = 5;
 let sliderInputs = [];
 let sliderValues = [];
+let comboSliderInputs = [];
+let comboSliderValues = [];
+let syncingBaseSliderUI = false;
 let currentViewState = { target: [0, 0, 0], zoom: 0 };
+
+function getComboContributionForControl(index) {
+  let value = 0;
+  const rowOffset = index * comboCount;
+  for (let j = 0; j < comboCount; j++) {
+    value += comboMatrix[rowOffset + j] * combo[j];
+  }
+  return value;
+}
+
+function syncBaseSlidersFromState() {
+  syncingBaseSliderUI = true;
+  for (let k = 0; k < K; k++) {
+    if (sliderInputs[k]) sliderInputs[k].value = String(p[k]);
+    if (sliderValues[k]) sliderValues[k].textContent = formatControlValue(p[k]);
+  }
+  syncingBaseSliderUI = false;
+}
+
+function recomputeControls(syncBaseUI) {
+  for (let k = 0; k < K; k++) {
+    const combined = pBase[k] + getComboContributionForControl(k);
+    p[k] = clampControlValue(k, combined);
+  }
+  if (syncBaseUI) {
+    syncBaseSlidersFromState();
+  }
+}
 
 function setControlsReady(ready) {
   if (!resetControlsBtn) return;
@@ -365,8 +508,11 @@ function requestUpdate() {
 function buildSliders() {
   const root = document.getElementById('sliders');
   root.innerHTML = '';
+  if (comboSlidersRoot) comboSlidersRoot.innerHTML = '';
   sliderInputs = [];
   sliderValues = [];
+  comboSliderInputs = [];
+  comboSliderValues = [];
   for (let k = 0; k < K; k++) {
     const spec = getControlSpec(k);
     const row = document.createElement('div');
@@ -386,9 +532,11 @@ function buildSliders() {
     val.textContent = formatControlValue(0);
 
     input.addEventListener('input', () => {
+      if (syncingBaseSliderUI) return;
       const v = Number(input.value);
-      p[k] = v;
-      val.textContent = formatControlValue(v);
+      const comboContribution = getComboContributionForControl(k);
+      pBase[k] = clampControlValue(k, v - comboContribution);
+      recomputeControls(true);
       requestUpdate();
     });
 
@@ -399,14 +547,57 @@ function buildSliders() {
     sliderInputs.push(input);
     sliderValues.push(val);
   }
+
+  if (!comboSlidersRoot) return;
+
+  for (let j = 0; j < comboCount; j++) {
+    const spec = getComboSpec(j);
+    const row = document.createElement('div');
+    row.className = 'row';
+
+    const label = document.createElement('label');
+    label.textContent = spec.label;
+
+    const input = document.createElement('input');
+    input.type = 'range';
+    input.min = String(-spec.range);
+    input.max = String(spec.range);
+    input.step = String(spec.step);
+    input.value = '0';
+
+    const val = document.createElement('span');
+    val.textContent = formatControlValue(0);
+
+    input.addEventListener('input', () => {
+      const v = Number(input.value);
+      combo[j] = v;
+      val.textContent = formatControlValue(v);
+      recomputeControls(true);
+      requestUpdate();
+    });
+
+    row.appendChild(label);
+    row.appendChild(input);
+    row.appendChild(val);
+    comboSlidersRoot.appendChild(row);
+    comboSliderInputs.push(input);
+    comboSliderValues.push(val);
+  }
 }
 
 function resetControls() {
   for (let k = 0; k < K; k++) {
+    pBase[k] = 0;
     p[k] = 0;
     if (sliderInputs[k]) sliderInputs[k].value = '0';
     if (sliderValues[k]) sliderValues[k].textContent = formatControlValue(0);
   }
+  for (let j = 0; j < comboCount; j++) {
+    combo[j] = 0;
+    if (comboSliderInputs[j]) comboSliderInputs[j].value = '0';
+    if (comboSliderValues[j]) comboSliderValues[j].textContent = formatControlValue(0);
+  }
+  recomputeControls(true);
   requestUpdate();
 }
 
@@ -414,9 +605,11 @@ async function start() {
   setControlsReady(false);
   updateLoadingProgress(0, NaN, false);
   const model = await loadPackedModel('./model_meta.json', './model.f32');
+  const loadedComboConfig = await loadComboMatrixJson('./vmode.json', model.k);
 
-  initModel(model.x, model.y, model.sx, model.sy, model.k);
+  initModel(model.x, model.y, model.sx, model.sy, model.k, loadedComboConfig);
   buildSliders();
+  recomputeControls(true);
   resizeDeck();
   updatePositions();
   posVersion++;
