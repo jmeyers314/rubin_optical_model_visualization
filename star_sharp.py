@@ -835,6 +835,48 @@ class StarSharp:
         U, S, Vh = np.linalg.svd(A, full_matrices=False)
         return U, S, Vh
 
+    def svd_gram(self) -> tuple[NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        """
+        Compute the SVD using a Gram-matrix eigendecomposition.
+
+        This is typically more efficient than direct SVD when the number of
+        rows in the design matrix is much larger than the number of columns.
+        It returns arrays with the same shapes/order as ``np.linalg.svd(...,
+        full_matrices=False)``:
+
+        - ``U`` shape: (n_samples, n_modes)
+        - ``S`` shape: (n_modes,)
+        - ``Vh`` shape: (n_modes, n_modes)
+        """
+        if self.ortho_transverse:
+            A = self._transverse_double_zernikes
+        else:
+            A = self.A
+        A = A * self._ranges
+        A = A * self._moments_power
+        A = A[..., self.use_dof]
+        A = A.reshape(-1, A.shape[-1])
+
+        gram = A.T @ A
+        evals, V = np.linalg.eigh(gram)
+
+        order = np.argsort(evals)[::-1]
+        evals = evals[order]
+        V = V[:, order]
+
+        evals = np.clip(evals, 0.0, None)
+        S = np.sqrt(evals)
+        Vh = V.T
+
+        U = np.zeros((A.shape[0], A.shape[1]), dtype=np.float64)
+        if S.size > 0:
+            tol = np.finfo(float).eps * max(A.shape) * max(S[0], 1.0)
+            nonzero = S > tol
+            if np.any(nonzero):
+                U[:, nonzero] = (A @ V[:, nonzero]) / S[nonzero]
+
+        return U, S, Vh
+
     def orthogonal_to_nominal(
         self,
         vstate,
