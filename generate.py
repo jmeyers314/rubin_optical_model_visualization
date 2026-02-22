@@ -9,8 +9,8 @@ from tqdm import tqdm
 
 ssh = StarSharp(
     "i",
-    transverse_pupil_radii = 8,
-    transverse_field_radii = 10,
+    transverse_pupil_radii = 12,
+    transverse_field_radii = 5,
     use_dof="0-9,10-16,30-34",
     nkeep=12,
     tqdm=tqdm
@@ -43,8 +43,8 @@ donut_factor = 5e2
 pupil_x,pupil_y = batoid.utils.hexapolar(
     outer=PUPIL_OUTER*0.99,  # Avoid clipping the actual pupil
     inner=PUPIL_INNER*1.01,
-    nrad=15,
-    naz=int(2 * np.pi * 15),
+    nrad=20,
+    naz=int(2 * np.pi * PUPIL_OUTER / (PUPIL_OUTER - PUPIL_INNER) * 20),
 )
 
 intra = ssh.fiducial.withGloballyShiftedOptic("Detector", [0, 0, -1.5e-3])
