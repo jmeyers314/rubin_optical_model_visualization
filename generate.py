@@ -1,8 +1,10 @@
 # Generate initial points and sensitivity
 
 import numpy as np
+import batoid
+from batoid_rubin import LSSTBuilder
 import json
-from star_sharp import StarSharp
+from star_sharp import StarSharp, PUPIL_OUTER, PUPIL_INNER
 from tqdm import tqdm
 
 ssh = StarSharp(
@@ -27,15 +29,146 @@ for i, (u, v) in enumerate(zip(ssh.field_u, ssh.field_v)):
     x0[i] += u
     y0[i] += v
 
-x0 = x0.astype(np.float32).ravel()
-y0 = y0.astype(np.float32).ravel()
-
 # Now the sensitivity
 dx *= factor
 dy *= factor
 
-Sx = dx.astype(np.float32).reshape(-1, 50).T
-Sy = dy.astype(np.float32).reshape(-1, 50).T
+Sx = dx
+Sy = dy
+
+# Add donuts
+
+donut_factor = 5e2
+
+pupil_x,pupil_y = batoid.utils.hexapolar(
+    outer=PUPIL_OUTER*0.99,  # Avoid clipping the actual pupil
+    inner=PUPIL_INNER*1.01,
+    nrad=15,
+    naz=int(2 * np.pi * 15),
+)
+
+intra = ssh.fiducial.withGloballyShiftedOptic("Detector", [0, 0, -1.5e-3])
+extra = ssh.fiducial.withGloballyShiftedOptic("Detector", [0, 0, +1.5e-3])
+builder_in = LSSTBuilder(intra)
+builder_ex = LSSTBuilder(extra)
+
+# Add intrafocal donuts
+xd = np.empty((8, len(pupil_x)))
+yd = np.empty((8, len(pupil_y)))
+SXd = np.empty((8, len(pupil_x), ssh.n_dof))
+SYd = np.empty((8, len(pupil_y), ssh.n_dof))
+
+bar = tqdm(total=ssh.n_dof*8, desc="Generating sensitivity")
+for idof, (step, sign) in enumerate(zip(ssh._steps, ssh.dof_signs)):
+    dof = np.zeros(ssh.n_dof)
+    dof[idof] = step * sign
+    perturbed_in = builder_in.with_aos_dof(dof).build()
+    perturbed_ex = builder_ex.with_aos_dof(dof).build()
+
+    for i, corner in enumerate([(-1.25, -1.25), (-1.25, 1.25), (1.25, -1.25), (1.25, 1.25)]):
+        # Intra
+        rays = batoid.RayVector.fromStop(
+            np.array(pupil_x),
+            np.array(pupil_y),
+            theta_x=np.deg2rad(corner[0]),
+            theta_y=np.deg2rad(corner[1]),
+            optic=intra,
+            wavelength=ssh.wavelength,
+        )
+        frays = intra.trace(rays.copy())
+        prays = perturbed_in.trace(rays.copy())
+        vignetted = frays.vignetted
+
+        meandx = np.nanmean(prays.x - frays.x)
+        meandy = np.nanmean(prays.y - frays.y)
+
+        SXd[i, :, idof] = (prays.x - frays.x - meandx) / step
+        SYd[i, :, idof] = (prays.y - frays.y - meandy) / step
+        SXd[i, vignetted, idof] = np.nan
+        SYd[i, vignetted, idof] = np.nan
+
+        if idof == 0:
+            xd[i] = np.array(frays.x)
+            yd[i] = np.array(frays.y)
+            xd[i][vignetted] = np.nan
+            yd[i][vignetted] = np.nan
+            xd[i] -= np.nanmean(xd[i])
+            yd[i] -= np.nanmean(yd[i])
+
+            xd[i] *= donut_factor
+            yd[i] *= donut_factor
+            dth = 10
+            sdth, cdth = np.sin(np.deg2rad(dth)), np.cos(np.deg2rad(dth))
+
+            dx = cdth * corner[0] - sdth * corner[1]
+            dy = sdth * corner[0] + cdth * corner[1]
+            xd[i] += dx*1.3
+            yd[i] += dy*1.3
+
+        bar.update(1)
+
+        # Extra
+        rays = batoid.RayVector.fromStop(
+            np.array(pupil_x),
+            np.array(pupil_y),
+            theta_x=np.deg2rad(corner[0]),
+            theta_y=np.deg2rad(corner[1]),
+            optic=extra,
+            wavelength=ssh.wavelength,
+        )
+        frays = extra.trace(rays.copy())
+        prays = perturbed_ex.trace(rays.copy())
+        vignetted = frays.vignetted
+
+        meandx = np.nanmean(prays.x - frays.x)
+        meandy = np.nanmean(prays.y - frays.y)
+
+        SXd[i+4, :, idof] = (prays.x - frays.x - meandx) / step
+        SYd[i+4, :, idof] = (prays.y - frays.y - meandy) / step
+        SXd[i+4, vignetted, idof] = np.nan
+        SYd[i+4, vignetted, idof] = np.nan
+
+        if idof == 0:
+            xd[i+4] = np.array(frays.x)
+            yd[i+4] = np.array(frays.y)
+            vignetted = frays.vignetted
+            xd[i+4][vignetted] = np.nan
+            yd[i+4][vignetted] = np.nan
+            xd[i+4] -= np.nanmean(xd[i+4])
+            yd[i+4] -= np.nanmean(yd[i+4])
+
+            xd[i+4] *= donut_factor
+            yd[i+4] *= donut_factor
+            dx = cdth * corner[0] + sdth * corner[1]
+            dy = -sdth * corner[0] + cdth * corner[1]
+            xd[i+4] += dx*1.3
+            yd[i+4] += dy*1.3
+
+        bar.update(1)
+
+SXd *= donut_factor
+SYd *= donut_factor
+
+x0 = x0.astype(np.float32).ravel()
+y0 = y0.astype(np.float32).ravel()
+
+xd = xd.astype(np.float32).ravel()
+yd = yd.astype(np.float32).ravel()
+
+Sx = Sx.astype(np.float32).reshape(-1, ssh.n_dof)
+Sy = Sy.astype(np.float32).reshape(-1, ssh.n_dof)
+
+SXd = SXd.astype(np.float32).reshape(-1, ssh.n_dof)
+SYd = SYd.astype(np.float32).reshape(-1, ssh.n_dof)
+
+x0 = np.concatenate([x0, xd])
+y0 = np.concatenate([y0, yd])
+
+Sx = np.concatenate([Sx, SXd])
+Sy = np.concatenate([Sy, SYd])
+
+Sx = Sx.T
+Sy = Sy.T
 
 N = x0.shape[0]
 K = Sx.shape[0]
@@ -64,9 +197,3 @@ meta = {
 }
 with open("model_meta.json", "w") as f:
     json.dump(meta, f, indent=2)
-
-U, S, Vh = ssh._svd
-Vmatrix = np.zeros((ssh.nkeep, ssh.n_dof), dtype=np.float32)
-for i, dof in enumerate(ssh.use_dof):
-    Vmatrix[:, dof] = Vh[:ssh.nkeep, i]
-print(Vmatrix.shape) # (12, 50)
