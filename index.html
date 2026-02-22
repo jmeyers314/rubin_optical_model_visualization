@@ -6,7 +6,7 @@
   <script src="https://unpkg.com/deck.gl@9.1.13/dist.min.js"></script>
   <style>
     html, body { margin: 0; height: 100%; }
-    body { display: grid; grid-template-columns: minmax(640px, 52vw) 1fr; font-family: system-ui, sans-serif; }
+    body { display: grid; grid-template-columns: minmax(320px, 26vw) 1fr; font-family: system-ui, sans-serif; }
     #ui  { position: relative; z-index: 10; padding: 12px; border-right: 1px solid #ddd; background: #fff; overflow: auto; }
     #vis {
       --grid-pitch-px: 24px;
@@ -43,43 +43,11 @@
     .row span { text-align: right; font-family: ui-monospace, Menlo, monospace; }
     .row input[type="range"] { margin: 0; }
     .controls { display: flex; gap: 8px; margin-bottom: 10px; }
-    .slider-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; min-height: 0; }
+    .slider-columns { display: grid; grid-template-columns: 1fr; gap: 12px; min-height: 0; }
     .control-column { min-width: 0; }
     .control-title { font-size: 12px; font-weight: 600; margin: 4px 0 8px; }
     .btn { border: 1px solid #bbb; background: #f7f7f7; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
     .btn:disabled { opacity: 0.55; cursor: not-allowed; }
-    .text-input {
-      border: 1px solid #bbb;
-      border-radius: 6px;
-      padding: 4px 8px;
-      font-size: 12px;
-      font-family: ui-monospace, Menlo, monospace;
-      min-width: 120px;
-    }
-    .number-input {
-      border: 1px solid #bbb;
-      border-radius: 6px;
-      padding: 4px 8px;
-      font-size: 12px;
-      width: 72px;
-    }
-    .control-config {
-      display: grid;
-      grid-template-columns: 58px 1fr 44px auto auto;
-      gap: 6px;
-      align-items: center;
-      margin-bottom: 10px;
-      font-size: 11px;
-    }
-    .control-config label { white-space: nowrap; }
-    .control-hint {
-      font-size: 11px;
-      color: #555;
-      margin: -4px 0 10px;
-    }
-    .row.is-inactive {
-      opacity: 0.42;
-    }
     .axis-labels {
       position: absolute;
       left: 10px;
@@ -172,22 +140,10 @@
     <div class="controls">
       <button id="reset-controls" class="btn" type="button" disabled>Loading…</button>
     </div>
-    <div class="control-config">
-      <label for="use-dof-input">use_dof</label>
-      <input id="use-dof-input" class="text-input" type="text" value="0-9,10-16,30-34" spellcheck="false" />
-      <label for="nkeep-input">nkeep</label>
-      <input id="nkeep-input" class="number-input" type="number" min="1" step="1" value="12" />
-      <button id="apply-modes" class="btn" type="button" disabled>Apply</button>
-    </div>
-    <div class="control-hint">use_dof format: <span>0-9,10-16,30-34</span>. Change inputs, then click Apply (or press Enter).</div>
     <div class="slider-columns">
       <div class="control-column">
-        <div class="control-title">Original controls</div>
+        <div class="control-title">Controls</div>
         <div id="sliders"></div>
-      </div>
-      <div class="control-column">
-        <div class="control-title">Linear combinations</div>
-        <div id="combo-sliders"></div>
       </div>
     </div>
   </div>
@@ -208,7 +164,6 @@
     </div>
   </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/numeric/1.2.6/numeric.min.js"></script>
 <script type="module" src="./main.js"></script>
 </body>
 </html>
