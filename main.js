@@ -211,6 +211,7 @@ function updatePositions() {
 }
 
 const vis = document.getElementById('vis');
+const gridCanvas = document.getElementById('grid-canvas');
 const canvas = document.getElementById('deck-canvas');
 const resetControlsBtn = document.getElementById('reset-controls');
 const mouseCoordsEl = document.getElementById('mouse-coords');
@@ -221,6 +222,8 @@ const loadingTextEl = document.getElementById('loading-text');
 const SCALE_BAR_WORLD_UNITS = 0.24;
 const GRID_PITCH_WORLD_UNITS = 0.048;
 const GRID_MAJOR_EVERY = 5;
+const GRID_MINOR_COLOR = 'rgba(122, 178, 255, 0.04)';
+const GRID_MAJOR_COLOR = 'rgba(122, 178, 255, 0.05)';
 let sliderInputs = [];
 let sliderValues = [];
 let currentViewState = { target: [0, 0, 0], zoom: 0 };
@@ -285,11 +288,15 @@ function getFitZoom(width, height, radius) {
 function resizeDeck() {
   const r = vis.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
+  if (gridCanvas) {
+    gridCanvas.width = Math.max(1, Math.floor(r.width * dpr));
+    gridCanvas.height = Math.max(1, Math.floor(r.height * dpr));
+  }
   canvas.width  = Math.max(1, Math.floor(r.width  * dpr));
   canvas.height = Math.max(1, Math.floor(r.height * dpr));
   const zoom = getFitZoom(r.width, r.height, modelRadius);
   currentViewState = { target: [0, 0, 0], zoom };
-  updateGridBackground(r.width, r.height);
+  drawGrid(r.width, r.height);
   updateScaleBar();
   deckgl.setProps({
     width: r.width,
@@ -298,24 +305,61 @@ function resizeDeck() {
   });
 }
 
-function updateGridBackground(width, height) {
-  if (!vis) return;
-  const scale = Math.pow(2, currentViewState.zoom);
-  const pitchPx = Math.max(2, GRID_PITCH_WORLD_UNITS * scale);
-  const majorPitchPx = Math.max(2, pitchPx * GRID_MAJOR_EVERY);
-  const originScreenX = width / 2 + (0 - currentViewState.target[0]) * scale;
-  const originScreenY = height / 2 - (0 - currentViewState.target[1]) * scale;
-  const offsetX = ((originScreenX % pitchPx) + pitchPx) % pitchPx;
-  const offsetY = ((originScreenY % pitchPx) + pitchPx) % pitchPx;
-  const majorOffsetX = ((originScreenX % majorPitchPx) + majorPitchPx) % majorPitchPx;
-  const majorOffsetY = ((originScreenY % majorPitchPx) + majorPitchPx) % majorPitchPx;
+function drawGrid(width, height) {
+  if (!gridCanvas) return;
+  const context = gridCanvas.getContext('2d');
+  if (!context) return;
 
-  vis.style.setProperty('--grid-pitch-px', `${pitchPx.toFixed(2)}px`);
-  vis.style.setProperty('--grid-major-pitch-px', `${majorPitchPx.toFixed(2)}px`);
-  vis.style.setProperty('--grid-offset-x', `${offsetX.toFixed(2)}px`);
-  vis.style.setProperty('--grid-offset-y', `${offsetY.toFixed(2)}px`);
-  vis.style.setProperty('--grid-major-offset-x', `${majorOffsetX.toFixed(2)}px`);
-  vis.style.setProperty('--grid-major-offset-y', `${majorOffsetY.toFixed(2)}px`);
+  const dpr = window.devicePixelRatio || 1;
+  const canvasWidth = Math.max(1, Math.floor(width * dpr));
+  const canvasHeight = Math.max(1, Math.floor(height * dpr));
+
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, canvasWidth, canvasHeight);
+
+  const scale = Math.pow(2, currentViewState.zoom);
+  const pitchDevicePx = Math.max(Math.round(2 * dpr), Math.round(GRID_PITCH_WORLD_UNITS * scale * dpr));
+  const majorPitchDevicePx = pitchDevicePx * GRID_MAJOR_EVERY;
+
+  const originScreenDeviceX = (width / 2 + (0 - currentViewState.target[0]) * scale) * dpr;
+  const originScreenDeviceY = (height / 2 - (0 - currentViewState.target[1]) * scale) * dpr;
+
+  const offsetDeviceX = ((originScreenDeviceX % pitchDevicePx) + pitchDevicePx) % pitchDevicePx;
+  const offsetDeviceY = ((originScreenDeviceY % pitchDevicePx) + pitchDevicePx) % pitchDevicePx;
+  const majorOffsetDeviceX = ((originScreenDeviceX % majorPitchDevicePx) + majorPitchDevicePx) % majorPitchDevicePx;
+  const majorOffsetDeviceY = ((originScreenDeviceY % majorPitchDevicePx) + majorPitchDevicePx) % majorPitchDevicePx;
+
+  context.lineWidth = 1;
+
+  context.strokeStyle = GRID_MINOR_COLOR;
+  context.beginPath();
+  for (let ix = 0, x = offsetDeviceX; x <= canvasWidth; ix++, x += pitchDevicePx) {
+    if (ix % GRID_MAJOR_EVERY === 0) continue;
+    const xf = Math.round(x) + 0.5;
+    context.moveTo(xf, 0);
+    context.lineTo(xf, canvasHeight);
+  }
+  for (let iy = 0, y = offsetDeviceY; y <= canvasHeight; iy++, y += pitchDevicePx) {
+    if (iy % GRID_MAJOR_EVERY === 0) continue;
+    const yf = Math.round(y) + 0.5;
+    context.moveTo(0, yf);
+    context.lineTo(canvasWidth, yf);
+  }
+  context.stroke();
+
+  context.strokeStyle = GRID_MAJOR_COLOR;
+  context.beginPath();
+  for (let x = majorOffsetDeviceX; x <= canvasWidth; x += majorPitchDevicePx) {
+    const xf = Math.round(x) + 0.5;
+    context.moveTo(xf, 0);
+    context.lineTo(xf, canvasHeight);
+  }
+  for (let y = majorOffsetDeviceY; y <= canvasHeight; y += majorPitchDevicePx) {
+    const yf = Math.round(y) + 0.5;
+    context.moveTo(0, yf);
+    context.lineTo(canvasWidth, yf);
+  }
+  context.stroke();
 }
 
 function updateScaleBar() {

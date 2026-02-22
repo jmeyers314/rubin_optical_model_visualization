@@ -9,33 +9,12 @@
     body { display: grid; grid-template-columns: minmax(320px, 26vw) 1fr; font-family: system-ui, sans-serif; }
     #ui  { position: relative; z-index: 10; padding: 12px; border-right: 1px solid #ddd; background: #fff; overflow: auto; }
     #vis {
-      --grid-pitch-px: 24px;
-      --grid-major-pitch-px: 120px;
-      --grid-offset-x: 0px;
-      --grid-offset-y: 0px;
-      --grid-major-offset-x: 0px;
-      --grid-major-offset-y: 0px;
       position: relative;
       z-index: 1;
       width: 100%;
       height: 100%;
       overflow: hidden;
       background-color: #0b0f14;
-      background-image:
-        linear-gradient(to right, rgba(122, 178, 255, 0.05) 1px, transparent 1px),
-        linear-gradient(to bottom, rgba(122, 178, 255, 0.05) 1px, transparent 1px),
-        linear-gradient(to right, rgba(122, 178, 255, 0.04) 1px, transparent 1px),
-        linear-gradient(to bottom, rgba(122, 178, 255, 0.04) 1px, transparent 1px);
-      background-size:
-        var(--grid-major-pitch-px) var(--grid-major-pitch-px),
-        var(--grid-major-pitch-px) var(--grid-major-pitch-px),
-        var(--grid-pitch-px) var(--grid-pitch-px),
-        var(--grid-pitch-px) var(--grid-pitch-px);
-      background-position:
-        var(--grid-major-offset-x) var(--grid-major-offset-y),
-        var(--grid-major-offset-x) var(--grid-major-offset-y),
-        var(--grid-offset-x) var(--grid-offset-y),
-        var(--grid-offset-x) var(--grid-offset-y);
     }
     #vis canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
     .row { display: grid; grid-template-columns: 135px 1fr 72px; gap: 6px; align-items: center; margin: 3px 0; }
@@ -148,6 +127,7 @@
     </div>
   </div>
   <div id="vis">
+    <canvas id="grid-canvas" aria-hidden="true"></canvas>
     <canvas id="deck-canvas"></canvas>
     <div id="loading-overlay" class="loading-overlay" aria-live="polite">
       <div class="loading-panel">
