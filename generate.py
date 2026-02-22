@@ -102,8 +102,8 @@ for idof, (step, sign) in enumerate(zip(ssh._steps, ssh.dof_signs)):
 
             dx = cdth * corner[0] - sdth * corner[1]
             dy = sdth * corner[0] + cdth * corner[1]
-            xd[i] += dx*1.3
-            yd[i] += dy*1.3
+            xd[i] += dx*1.4
+            yd[i] += dy*1.4
 
         bar.update(1)
 
@@ -141,8 +141,8 @@ for idof, (step, sign) in enumerate(zip(ssh._steps, ssh.dof_signs)):
             yd[i+4] *= donut_factor
             dx = cdth * corner[0] + sdth * corner[1]
             dy = -sdth * corner[0] + cdth * corner[1]
-            xd[i+4] += dx*1.3
-            yd[i+4] += dy*1.3
+            xd[i+4] += dx*1.4
+            yd[i+4] += dy*1.4
 
         bar.update(1)
 
