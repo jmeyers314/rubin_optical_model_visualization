@@ -47,6 +47,9 @@ let comboMatrix = new Float32Array(0);
 let comboLabels = [];
 let comboRanges = [];
 let comboSteps = [];
+let comboModeMatrix = [];
+let comboSingularValues = [];
+let comboSelectedDofs = [];
 let activeDofs = new Set();
 let dofRanges = [];
 let dofPower = [];
@@ -228,8 +231,12 @@ function computeComboConfigFromSelection(selectedDofs, requestedNkeep) {
 
   const svd = window.numeric.svd(gram);
   const v = svd?.V;
+  const s = svd?.S;
   if (!Array.isArray(v) || v.length !== localDofCount) {
     throw new Error('numeric.svd returned an unexpected V matrix');
+  }
+  if (!Array.isArray(s) || s.length === 0) {
+    throw new Error('numeric.svd returned unexpected singular values');
   }
 
   const controlMajor = new Float32Array(K * nkeep);
@@ -307,7 +314,9 @@ function computeComboConfigFromSelection(selectedDofs, requestedNkeep) {
     controlMajor,
     labels: Array.from({length: nkeep}, (_, i) => `Vmode ${i + 1}`),
     ranges,
-    steps
+    steps,
+    modeMatrix: v,
+    singularValues: s.map((value) => Number(value))
   };
 }
 
@@ -324,13 +333,17 @@ function setDofActivity(selectedDofs) {
 function applyModeSelection(selectedDofs, requestedNkeep) {
   const comboConfig = computeComboConfigFromSelection(selectedDofs, requestedNkeep);
   setDofActivity(selectedDofs);
+  comboSelectedDofs = selectedDofs.slice();
   comboCount = comboConfig.comboCount;
   comboLabels = comboConfig.labels ?? [];
   comboRanges = comboConfig.ranges ?? [];
   comboSteps = comboConfig.steps ?? [];
+  comboModeMatrix = comboConfig.modeMatrix ?? [];
+  comboSingularValues = comboConfig.singularValues ?? [];
   combo = new Float32Array(comboCount);
   comboMatrix = comboConfig.controlMajor;
   buildSliders();
+  renderVmodeDiagnostics();
   resetControls();
 }
 
@@ -529,6 +542,13 @@ const useDofInput = document.getElementById('use-dof-input');
 const nkeepInput = document.getElementById('nkeep-input');
 const applyModesBtn = document.getElementById('apply-modes');
 const comboSlidersRoot = document.getElementById('combo-sliders');
+const vmodeTabPlotsBtn = document.getElementById('vmode-tab-plots');
+const vmodeTabCoeffBtn = document.getElementById('vmode-tab-coeff');
+const vmodePanelPlots = document.getElementById('vmode-panel-plots');
+const vmodePanelCoeff = document.getElementById('vmode-panel-coeff');
+const vmodeMatrixCanvas = document.getElementById('vmode-matrix-canvas');
+const vmodeSpectrumCanvas = document.getElementById('vmode-spectrum-canvas');
+const vmodeCoeffOutput = document.getElementById('vmode-coeff-output');
 const mouseCoordsEl = document.getElementById('mouse-coords');
 const scaleBarLineEl = document.getElementById('scale-bar-line');
 const loadingOverlayEl = document.getElementById('loading-overlay');
@@ -545,6 +565,281 @@ let comboSliderInputs = [];
 let comboSliderValues = [];
 let syncingBaseSliderUI = false;
 let currentViewState = { target: [0, 0, 0], zoom: 0 };
+
+function setVmodeDiagTab(tabName) {
+  const showPlots = tabName !== 'coeff';
+  if (vmodePanelPlots) vmodePanelPlots.classList.toggle('is-active', showPlots);
+  if (vmodePanelCoeff) vmodePanelCoeff.classList.toggle('is-active', !showPlots);
+  if (vmodeTabPlotsBtn) vmodeTabPlotsBtn.classList.toggle('is-active', showPlots);
+  if (vmodeTabCoeffBtn) vmodeTabCoeffBtn.classList.toggle('is-active', !showPlots);
+}
+
+function clamp01(value) {
+  return Math.max(0, Math.min(1, value));
+}
+
+function blueWhiteRed(value) {
+  const t = clamp01((value + 1) * 0.5);
+  let r;
+  let g;
+  let b;
+  if (t <= 0.5) {
+    const local = t / 0.5;
+    r = Math.round(64 + local * (255 - 64));
+    g = Math.round(128 + local * (255 - 128));
+    b = Math.round(255);
+  } else {
+    const local = (t - 0.5) / 0.5;
+    r = Math.round(255);
+    g = Math.round(255 + local * (64 - 255));
+    b = Math.round(255 + local * (64 - 255));
+  }
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+function setupHiDpiCanvas(canvasEl) {
+  if (!canvasEl) return null;
+  const rect = canvasEl.getBoundingClientRect();
+  const dpr = window.devicePixelRatio || 1;
+  const width = Math.max(1, Math.floor(rect.width * dpr));
+  const height = Math.max(1, Math.floor(rect.height * dpr));
+  canvasEl.width = width;
+  canvasEl.height = height;
+  const context = canvasEl.getContext('2d');
+  if (!context) return null;
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  context.clearRect(0, 0, width, height);
+  return {context, width, height, dpr};
+}
+
+function renderVmodeMatrix() {
+  const canvasState = setupHiDpiCanvas(vmodeMatrixCanvas);
+  if (!canvasState) return;
+  const {context, width, height} = canvasState;
+
+  const matrix = comboModeMatrix;
+  const nRows = Array.isArray(matrix) ? matrix.length : 0;
+  const nCols = nRows > 0 && Array.isArray(matrix[0]) ? matrix[0].length : 0;
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, width, height);
+  if (nRows === 0 || nCols === 0) return;
+
+  const left = 28;
+  const right = Math.max(left + 10, width - 8);
+  const top = 8;
+  const bottom = Math.max(top + 10, height - 20);
+  const plotW = Math.max(1, right - left);
+  const plotH = Math.max(1, bottom - top);
+
+  let vmax = 0;
+  for (let row = 0; row < nRows; row++) {
+    for (let col = 0; col < nCols; col++) {
+      const value = Math.abs(Number(matrix[row][col]));
+      if (value > vmax) vmax = value;
+    }
+  }
+  vmax = Math.max(vmax, 1e-12);
+
+  const cellW = plotW / nCols;
+  const cellH = plotH / nRows;
+  for (let row = 0; row < nRows; row++) {
+    for (let col = 0; col < nCols; col++) {
+      const value = Number(matrix[row][col]) / vmax;
+      context.fillStyle = blueWhiteRed(value);
+      const x0 = Math.floor(left + col * cellW);
+      const y0 = Math.floor(top + row * cellH);
+      const x1 = Math.ceil(left + (col + 1) * cellW);
+      const y1 = Math.ceil(top + (row + 1) * cellH);
+      context.fillRect(x0, y0, Math.max(1, x1 - x0), Math.max(1, y1 - y0));
+    }
+  }
+
+  context.strokeStyle = 'rgba(0, 0, 0, 0.12)';
+  context.lineWidth = 1;
+  for (let c = 0; c <= nCols; c++) {
+    const x = Math.round(left + c * cellW) + 0.5;
+    context.beginPath();
+    context.moveTo(x, top);
+    context.lineTo(x, bottom);
+    context.stroke();
+  }
+  for (let r = 0; r <= nRows; r++) {
+    const y = Math.round(top + r * cellH) + 0.5;
+    context.beginPath();
+    context.moveTo(left, y);
+    context.lineTo(right, y);
+    context.stroke();
+  }
+
+  const keepCols = Math.max(0, Math.min(comboCount, nCols));
+  if (keepCols < nCols) {
+    const fadeX = left + keepCols * cellW;
+    context.fillStyle = 'rgba(80, 80, 80, 0.28)';
+    context.fillRect(fadeX, top, right - fadeX, bottom - top);
+
+    context.strokeStyle = 'rgba(40, 40, 40, 0.65)';
+    context.lineWidth = 1.5;
+    context.beginPath();
+    context.moveTo(Math.round(fadeX) + 0.5, top);
+    context.lineTo(Math.round(fadeX) + 0.5, bottom);
+    context.stroke();
+  }
+
+  const dofGroupIndex = (dof) => {
+    if (dof <= 4) return 0;
+    if (dof <= 9) return 1;
+    if (dof <= 29) return 2;
+    return 3;
+  };
+
+  if (comboSelectedDofs.length === nRows) {
+    context.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+    context.lineWidth = 2;
+    for (let row = 1; row < nRows; row++) {
+      const prevGroup = dofGroupIndex(comboSelectedDofs[row - 1]);
+      const thisGroup = dofGroupIndex(comboSelectedDofs[row]);
+      if (prevGroup === thisGroup) continue;
+      const y = Math.round(top + row * cellH) + 0.5;
+      context.beginPath();
+      context.moveTo(left, y);
+      context.lineTo(right, y);
+      context.stroke();
+    }
+  }
+
+  context.lineWidth = 1;
+
+  context.fillStyle = '#444';
+  context.font = '11px system-ui, sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'alphabetic';
+  context.fillText('mode index', (left + right) / 2, height - 4);
+
+  context.save();
+  context.translate(10, (top + bottom) / 2);
+  context.rotate(-Math.PI / 2);
+  context.textAlign = 'center';
+  context.textBaseline = 'alphabetic';
+  context.fillText('selected dof index', 0, 0);
+  context.restore();
+}
+
+function renderVmodeSpectrum() {
+  const canvasState = setupHiDpiCanvas(vmodeSpectrumCanvas);
+  if (!canvasState) return;
+  const {context, width, height} = canvasState;
+
+  const values = comboSingularValues;
+  const n = Array.isArray(values) ? values.length : 0;
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, width, height);
+  if (n === 0) return;
+
+  const left = 36;
+  const right = Math.max(left + 10, width - 8);
+  const top = 8;
+  const bottom = Math.max(top + 10, height - 18);
+  const plotW = Math.max(1, right - left);
+  const plotH = Math.max(1, bottom - top);
+
+  const logs = values.map((value) => Math.log10(Math.max(Number(value), 1e-20)));
+  const maxLog = Math.max(...logs);
+  const minLog = Math.min(...logs);
+  const denom = Math.max(1e-12, maxLog - minLog);
+
+  context.strokeStyle = 'rgba(0, 0, 0, 0.18)';
+  context.lineWidth = 1;
+  context.beginPath();
+  context.moveTo(left + 0.5, top + 0.5);
+  context.lineTo(left + 0.5, bottom + 0.5);
+  context.lineTo(right + 0.5, bottom + 0.5);
+  context.stroke();
+
+  context.strokeStyle = '#1f4e9a';
+  context.lineWidth = 1.5;
+  context.beginPath();
+  for (let i = 0; i < n; i++) {
+    const x = left + (n === 1 ? 0 : (i / (n - 1)) * plotW);
+    const y = top + ((maxLog - logs[i]) / denom) * plotH;
+    if (i === 0) context.moveTo(x, y);
+    else context.lineTo(x, y);
+  }
+  context.stroke();
+
+  const keepIndex = Math.max(1, Math.min(comboCount, n)) - 1;
+  const keepX = left + (n === 1 ? 0 : (keepIndex / (n - 1)) * plotW);
+  context.strokeStyle = 'rgba(180, 30, 30, 0.7)';
+  context.setLineDash([4, 3]);
+  context.beginPath();
+  context.moveTo(keepX + 0.5, top);
+  context.lineTo(keepX + 0.5, bottom);
+  context.stroke();
+  context.setLineDash([]);
+
+  context.fillStyle = '#444';
+  context.font = '11px system-ui, sans-serif';
+  context.textAlign = 'center';
+  context.textBaseline = 'alphabetic';
+  context.fillText('mode index', (left + right) / 2, height - 4);
+
+  context.save();
+  context.translate(11, (top + bottom) / 2);
+  context.rotate(-Math.PI / 2);
+  context.textAlign = 'center';
+  context.textBaseline = 'alphabetic';
+  context.fillText('log10(singular value)', 0, 0);
+  context.restore();
+
+  context.textAlign = 'right';
+  context.textBaseline = 'middle';
+  context.fillText(maxLog.toFixed(2), left - 4, top);
+  context.fillText(minLog.toFixed(2), left - 4, bottom);
+
+  context.textAlign = 'left';
+  context.textBaseline = 'top';
+  context.fillStyle = 'rgba(180, 30, 30, 0.8)';
+  context.fillText(`nkeep=${comboCount}`, Math.min(keepX + 4, right - 52), top + 2);
+}
+
+function renderVmodeCoefficients() {
+  if (!vmodeCoeffOutput) return;
+  const matrix = comboModeMatrix;
+  const nRows = Array.isArray(matrix) ? matrix.length : 0;
+  const nCols = nRows > 0 && Array.isArray(matrix[0]) ? matrix[0].length : 0;
+  if (nRows === 0 || nCols === 0 || comboSelectedDofs.length !== nRows) {
+    vmodeCoeffOutput.value = 'No vmode coefficients available yet. Click Apply to compute modes.';
+    return;
+  }
+
+  const header = ['dof_index', 'dof_name'];
+  for (let col = 0; col < nCols; col++) {
+    header.push(`mode_${col + 1}`);
+  }
+
+  const rows = [header.join(',')];
+  for (let row = 0; row < nRows; row++) {
+    const dof = comboSelectedDofs[row];
+    const label = CONTROL_NAMES[dof] ?? `p${dof}`;
+    const values = [String(dof), `"${label.replaceAll('"', '""')}"`];
+    for (let col = 0; col < nCols; col++) {
+      values.push(Number(matrix[row][col]).toExponential(8));
+    }
+    rows.push(values.join(','));
+  }
+
+  rows.push('');
+  rows.push(`nkeep,${comboCount}`);
+  if (Array.isArray(comboSingularValues) && comboSingularValues.length > 0) {
+    rows.push(`singular_values,${comboSingularValues.map((v) => Number(v).toExponential(8)).join(',')}`);
+  }
+  vmodeCoeffOutput.value = rows.join('\n');
+}
+
+function renderVmodeDiagnostics() {
+  renderVmodeMatrix();
+  renderVmodeSpectrum();
+  renderVmodeCoefficients();
+}
 
 function getComboContributionForControl(index) {
   if (comboCount === 0) return 0;
@@ -910,6 +1205,7 @@ start().catch((error) => {
 });
 
 window.addEventListener('resize', () => {
+  renderVmodeDiagnostics();
   resizeDeck();
   render();
 });
@@ -947,6 +1243,16 @@ if (useDofInput) {
 if (nkeepInput) {
   nkeepInput.addEventListener('keydown', handleModeInputEnter);
 }
+
+if (vmodeTabPlotsBtn) {
+  vmodeTabPlotsBtn.addEventListener('click', () => setVmodeDiagTab('plots'));
+}
+
+if (vmodeTabCoeffBtn) {
+  vmodeTabCoeffBtn.addEventListener('click', () => setVmodeDiagTab('coeff'));
+}
+
+setVmodeDiagTab('plots');
 
 vis.addEventListener('mousemove', updateMouseCoords);
 vis.addEventListener('mouseleave', clearMouseCoords);
