@@ -345,7 +345,7 @@ const ZERNIKE_DISPLAY_ROWS = [
   {label: 'Z27,28:', terms: [27, 28]},
 ];
 let sliderInputs = [];
-let sliderValues = [];
+let parameterInputs = [];
 let currentViewState = { target: [0, 0, 0], zoom: 0 };
 let deckgl = null;
 let lastStartupError = '';
@@ -752,7 +752,43 @@ function buildSliders() {
   const root = document.getElementById('sliders');
   root.innerHTML = '';
   sliderInputs = [];
-  sliderValues = [];
+  parameterInputs = [];
+
+  function applyControlValue(controlIndex, rawValue) {
+    const parsed = Number(rawValue);
+    if (!Number.isFinite(parsed)) return;
+    const clamped = clampControlValue(controlIndex, parsed);
+    p[controlIndex] = clamped;
+
+    if (sliderInputs[controlIndex]) {
+      sliderInputs[controlIndex].value = String(clamped);
+    }
+    if (parameterInputs[controlIndex]) {
+      parameterInputs[controlIndex].value = formatControlValue(clamped);
+    }
+
+    requestUpdate();
+  }
+
+  function commitNumericInput(controlIndex) {
+    const input = parameterInputs[controlIndex];
+    if (!input) return;
+
+    const raw = input.value.trim();
+    if (raw === '') {
+      input.value = formatControlValue(p[controlIndex]);
+      return;
+    }
+
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed)) {
+      input.value = formatControlValue(p[controlIndex]);
+      return;
+    }
+
+    applyControlValue(controlIndex, parsed);
+  }
+
   for (let k = 0; k < K; k++) {
     const spec = getControlSpec(k);
     const row = document.createElement('div');
@@ -768,22 +804,45 @@ function buildSliders() {
     input.step = String(spec.step);
     input.value = '0';
 
-    const val = document.createElement('span');
-    val.textContent = formatControlValue(0);
+    const numericInput = document.createElement('input');
+    numericInput.type = 'number';
+    numericInput.min = String(-spec.range);
+    numericInput.max = String(spec.range);
+    numericInput.step = String(spec.step);
+    numericInput.value = formatControlValue(0);
 
     input.addEventListener('input', () => {
-      const v = Number(input.value);
-      p[k] = clampControlValue(k, v);
-      val.textContent = formatControlValue(p[k]);
-      requestUpdate();
+      applyControlValue(k, input.value);
+    });
+
+    numericInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        commitNumericInput(k);
+        return;
+      }
+
+      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+        requestAnimationFrame(() => {
+          commitNumericInput(k);
+        });
+      }
+    });
+
+    numericInput.addEventListener('change', () => {
+      commitNumericInput(k);
+    });
+
+    numericInput.addEventListener('blur', () => {
+      commitNumericInput(k);
     });
 
     row.appendChild(label);
     row.appendChild(input);
-    row.appendChild(val);
+    row.appendChild(numericInput);
     root.appendChild(row);
     sliderInputs.push(input);
-    sliderValues.push(val);
+    parameterInputs.push(numericInput);
   }
 }
 
@@ -791,7 +850,7 @@ function resetControls() {
   for (let k = 0; k < K; k++) {
     p[k] = 0;
     if (sliderInputs[k]) sliderInputs[k].value = '0';
-    if (sliderValues[k]) sliderValues[k].textContent = formatControlValue(0);
+    if (parameterInputs[k]) parameterInputs[k].value = formatControlValue(0);
   }
   requestUpdate();
 }
@@ -884,7 +943,7 @@ vis.addEventListener('mouseleave', clearMouseCoords);
 window.addEventListener('keydown', (event) => {
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
   const tag = event.target && event.target.tagName;
-  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (tag === 'TEXTAREA' || tag === 'SELECT') return;
   if (event.key === 'r' || event.key === 'R') {
     event.preventDefault();
     resetControls();

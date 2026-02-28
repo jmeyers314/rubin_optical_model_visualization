@@ -42,10 +42,17 @@
       background-color: #0b0f14;
     }
     #vis canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; pointer-events: none; }
-    .row { display: grid; grid-template-columns: 135px 1fr 72px; gap: 6px; align-items: center; margin: 3px 0; }
+    .row { display: grid; grid-template-columns: 135px 1fr 86px; gap: 6px; align-items: center; margin: 3px 0; }
     .row label { white-space: nowrap; font-size: 11px; }
     .row span { text-align: right; font-family: ui-monospace, Menlo, monospace; }
     .row input[type="range"] { margin: 0; }
+    .row input[type="number"] {
+      width: 100%;
+      box-sizing: border-box;
+      font-size: 11px;
+      font-family: ui-monospace, Menlo, monospace;
+      padding: 2px 4px;
+    }
     .controls { display: flex; gap: 8px; margin-bottom: 10px; }
     .checkbox-row {
       display: flex;
