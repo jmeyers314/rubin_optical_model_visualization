@@ -34,9 +34,13 @@ const CONTROL_RANGES = [
 ];
 
 let K = CONTROL_NAMES.length;
+const DONUT_CORNERS = 4;
+const DONUT_ZERNIKE_TERMS = 29;
 
 let p = new Float32Array(K);
 let x0, y0, Sx, Sy;
+let zk0 = new Float32Array(0);
+let dZk = new Float32Array(0);
 let modelRadius = WORLD_RADIUS;
 let positions = new Float32Array(0);
 let data = [];
@@ -119,8 +123,10 @@ async function loadPackedModel(metaUrl, modelUrl) {
   const initSpec = layout ? layout.init_xy : undefined;
   const sxSpec = layout ? layout.Sx : undefined;
   const sySpec = layout ? layout.Sy : undefined;
-  if (!initSpec || !sxSpec || !sySpec) {
-    throw new Error('Metadata layout must include init_xy, Sx, and Sy blocks');
+  const zk0Spec = layout ? layout.zk0 : undefined;
+  const dzkSpec = layout ? layout.dzk : undefined;
+  if (!initSpec || !sxSpec || !sySpec || !zk0Spec || !dzkSpec) {
+    throw new Error('Metadata layout must include init_xy, Sx, Sy, zk0, and dzk blocks');
   }
 
   const initOffset = Number(initSpec.offset_f32);
@@ -129,9 +135,13 @@ async function loadPackedModel(metaUrl, modelUrl) {
   const sxLength = Number(sxSpec.length_f32);
   const syOffset = Number(sySpec.offset_f32);
   const syLength = Number(sySpec.length_f32);
+  const zk0Offset = Number(zk0Spec.offset_f32);
+  const zk0Length = Number(zk0Spec.length_f32);
+  const dzkOffset = Number(dzkSpec.offset_f32);
+  const dzkLength = Number(dzkSpec.length_f32);
 
   if (
-    ![initOffset, initLength, sxOffset, sxLength, syOffset, syLength].every(Number.isInteger)
+    ![initOffset, initLength, sxOffset, sxLength, syOffset, syLength, zk0Offset, zk0Length, dzkOffset, dzkLength].every(Number.isInteger)
   ) {
     throw new Error('All metadata offsets/lengths must be integers');
   }
@@ -140,7 +150,21 @@ async function loadPackedModel(metaUrl, modelUrl) {
     throw new Error('Metadata block lengths do not match N/K');
   }
 
-  const totalExpected = Math.max(initOffset + initLength, sxOffset + sxLength, syOffset + syLength);
+  const expectedZk0Length = DONUT_CORNERS * DONUT_ZERNIKE_TERMS;
+  const expectedDzkLength = DONUT_CORNERS * DONUT_ZERNIKE_TERMS * k;
+  if (zk0Length !== expectedZk0Length || dzkLength !== expectedDzkLength) {
+    throw new Error(
+      `Metadata zk block lengths do not match expected shapes (zk0=${expectedZk0Length}, dzk=${expectedDzkLength})`
+    );
+  }
+
+  const totalExpected = Math.max(
+    initOffset + initLength,
+    sxOffset + sxLength,
+    syOffset + syLength,
+    zk0Offset + zk0Length,
+    dzkOffset + dzkLength
+  );
   if (packed.length < totalExpected) {
     throw new Error(`Packed model too short: expected at least ${totalExpected} float32 values, got ${packed.length}`);
   }
@@ -155,12 +179,16 @@ async function loadPackedModel(metaUrl, modelUrl) {
 
   const loadedSx = new Float32Array(packed.subarray(sxOffset, sxOffset + sxLength));
   const loadedSy = new Float32Array(packed.subarray(syOffset, syOffset + syLength));
+  const loadedZk0 = new Float32Array(packed.subarray(zk0Offset, zk0Offset + zk0Length));
+  const loadedDzk = new Float32Array(packed.subarray(dzkOffset, dzkOffset + dzkLength));
 
   return {
     x,
     y,
     sx: loadedSx,
     sy: loadedSy,
+    zk0: loadedZk0,
+    dzk: loadedDzk,
     k
   };
 }
@@ -224,7 +252,7 @@ async function fetchArrayBufferWithProgress(url, onProgress) {
   return merged.buffer;
 }
 
-function initModel(initialX, initialY, initialSx, initialSy, loadedK) {
+function initModel(initialX, initialY, initialSx, initialSy, initialZk0, initialDzk, loadedK) {
   N = initialX.length;
   if (Number.isInteger(loadedK) && loadedK > 0) {
     K = loadedK;
@@ -236,19 +264,29 @@ function initModel(initialX, initialY, initialSx, initialSy, loadedK) {
   data = Array.from({length: N}, (_, i) => i);
   Sx = new Float32Array(K * N);
   Sy = new Float32Array(K * N);
+  zk0 = new Float32Array(DONUT_CORNERS * DONUT_ZERNIKE_TERMS);
+  dZk = new Float32Array(DONUT_CORNERS * DONUT_ZERNIKE_TERMS * K);
 
   const R = estimateRadius(x0, y0);
   modelRadius = R;
 
-  if (!initialSx || !initialSy) {
-    throw new Error('Missing Sx/Sy sensitivity arrays in loaded model');
+  if (!initialSx || !initialSy || !initialZk0 || !initialDzk) {
+    throw new Error('Missing Sx/Sy/zk0/dzk arrays in loaded model');
   }
 
   if (initialSx.length !== K * N || initialSy.length !== K * N) {
     throw new Error('Loaded sensitivity sizes do not match K*N');
   }
+  if (initialZk0.length !== DONUT_CORNERS * DONUT_ZERNIKE_TERMS) {
+    throw new Error('Loaded zk0 size does not match expected donut/corner dimensions');
+  }
+  if (initialDzk.length !== DONUT_CORNERS * DONUT_ZERNIKE_TERMS * K) {
+    throw new Error('Loaded dzk size does not match expected donut/corner/K dimensions');
+  }
   Sx.set(initialSx);
   Sy.set(initialSy);
+  zk0.set(initialZk0);
+  dZk.set(initialDzk);
 }
 
 function updatePositions() {
@@ -271,6 +309,7 @@ const vis = document.getElementById('vis');
 const gridCanvas = document.getElementById('grid-canvas');
 const canvas = document.getElementById('deck-canvas');
 const resetControlsBtn = document.getElementById('reset-controls');
+const includeIntrinsicsCheckbox = document.getElementById('include-intrinsics');
 const mouseCoordsEl = document.getElementById('mouse-coords');
 const scaleBarLineEl = document.getElementById('scale-bar-line');
 const loadingOverlayEl = document.getElementById('loading-overlay');
@@ -283,11 +322,35 @@ const GRID_PITCH_WORLD_UNITS = 0.048;
 const GRID_MAJOR_EVERY = 5;
 const GRID_MINOR_COLOR = 'rgba(122, 178, 255, 0.04)';
 const GRID_MAJOR_COLOR = 'rgba(122, 178, 255, 0.05)';
+const CORNER_OVERLAY_POSITIONS = [
+  {left: '4%', top: '80%'},
+  {left: '4%', top: '8%'},
+  {right: '4%', top: '80%'},
+  {right: '4%', top: '8%'},
+];
+const ZERNIKE_DISPLAY_ROWS = [
+  {label: 'Z4:', terms: [4]},
+  {label: 'Z5,6:', terms: [5, 6]},
+  {label: 'Z7,8:', terms: [7, 8]},
+  {label: 'Z9,10:', terms: [9, 10]},
+  {label: 'Z11:', terms: [11]},
+  {label: 'Z12,13:', terms: [12, 13]},
+  {label: 'Z14,15:', terms: [14, 15]},
+  {label: 'Z16,17:', terms: [16, 17]},
+  {label: 'Z18,19:', terms: [18, 19]},
+  {label: 'Z20,21:', terms: [20, 21]},
+  {label: 'Z22:', terms: [22]},
+  {label: 'Z23,24:', terms: [23, 24]},
+  {label: 'Z25,26:', terms: [25, 26]},
+  {label: 'Z27,28:', terms: [27, 28]},
+];
 let sliderInputs = [];
 let sliderValues = [];
 let currentViewState = { target: [0, 0, 0], zoom: 0 };
 let deckgl = null;
 let lastStartupError = '';
+let zernikeCornerEls = [];
+let includeIntrinsics = true;
 
 function setControlsReady(ready) {
   if (!resetControlsBtn) return;
@@ -334,6 +397,95 @@ function showLoadingError(errorMessage) {
 function setCopyDiagnosticsStatus(message) {
   if (!copyDiagnosticsStatusEl) return;
   copyDiagnosticsStatusEl.textContent = message;
+}
+
+function zernikeIndex(cornerIndex, termIndex, dofIndex) {
+  return (cornerIndex * DONUT_ZERNIKE_TERMS + termIndex) * K + dofIndex;
+}
+
+function evaluateCornerZernike(cornerIndex, termIndex) {
+  const base = includeIntrinsics ? zk0[cornerIndex * DONUT_ZERNIKE_TERMS + termIndex] : 0;
+  let delta = 0;
+  for (let k = 0; k < K; k++) {
+    delta += dZk[zernikeIndex(cornerIndex, termIndex, k)] * p[k];
+  }
+  return base + delta;
+}
+
+function formatZernikeFixed5(value) {
+  if (!Number.isFinite(value)) return '-----';
+  const rounded = Math.round(value);
+  if (rounded < -9999 || rounded > 99999) return '#####';
+  return `${rounded}`.padStart(5, ' ');
+}
+
+function formatZernikeRowText(rowLabel, rowTerms, rowValuesByTerm) {
+  const label = rowLabel.padEnd(8, ' ');
+  const blank = ' '.repeat(5);
+
+  if (rowTerms.length === 1) {
+    const center = formatZernikeFixed5(rowValuesByTerm[rowTerms[0]]);
+    return `${label} ${blank} ${center} ${blank}`;
+  }
+
+  const left = formatZernikeFixed5(rowValuesByTerm[rowTerms[0]]);
+  const right = formatZernikeFixed5(rowValuesByTerm[rowTerms[1]]);
+  return `${label} ${left} ${blank} ${right}`;
+}
+
+function buildZernikeOutputs() {
+  const root = document.getElementById('zernike-overlay');
+  if (!root) return;
+
+  root.innerHTML = '';
+  zernikeCornerEls = [];
+
+  for (let cornerIndex = 0; cornerIndex < DONUT_CORNERS; cornerIndex++) {
+    const card = document.createElement('div');
+    card.className = 'zernike-corner';
+    const anchor = CORNER_OVERLAY_POSITIONS[cornerIndex] || {left: '50%', top: '50%'};
+    if (anchor.left != null) card.style.left = anchor.left;
+    if (anchor.right != null) card.style.right = anchor.right;
+    card.style.top = anchor.top;
+
+    const rowsEl = document.createElement('div');
+    rowsEl.className = 'zernike-rows';
+
+    const cornerRowEls = [];
+    for (const rowSpec of ZERNIKE_DISPLAY_ROWS) {
+      const rowEl = document.createElement('div');
+      rowEl.className = 'zernike-row';
+
+      const valueEl = document.createElement('span');
+      valueEl.className = 'zernike-value';
+      valueEl.textContent = formatZernikeRowText(rowSpec.label, rowSpec.terms, {});
+      rowEl.appendChild(valueEl);
+
+      rowsEl.appendChild(rowEl);
+      cornerRowEls.push({label: rowSpec.label, terms: rowSpec.terms, valueEl});
+    }
+
+    card.appendChild(rowsEl);
+    root.appendChild(card);
+    zernikeCornerEls.push(cornerRowEls);
+  }
+}
+
+function updateZernikeOutputs() {
+  if (!zernikeCornerEls.length) return;
+
+  for (let cornerIndex = 0; cornerIndex < DONUT_CORNERS; cornerIndex++) {
+    const cornerRows = zernikeCornerEls[cornerIndex];
+    if (!cornerRows) continue;
+
+    for (const row of cornerRows) {
+      const rowValuesByTerm = {};
+      for (const term of row.terms) {
+        rowValuesByTerm[term] = evaluateCornerZernike(cornerIndex, term);
+      }
+      row.valueEl.textContent = formatZernikeRowText(row.label, row.terms, rowValuesByTerm);
+    }
+  }
 }
 
 function initializeDeck() {
@@ -590,6 +742,7 @@ function requestUpdate() {
   requestAnimationFrame(() => {
     pending = false;
     updatePositions();
+    updateZernikeOutputs();
     posVersion++;
     render();
   });
@@ -660,10 +813,12 @@ async function start() {
   initializeDeck();
   const model = await loadPackedModel('./model_meta.json', './model.f32');
 
-  initModel(model.x, model.y, model.sx, model.sy, model.k);
+  initModel(model.x, model.y, model.sx, model.sy, model.zk0, model.dzk, model.k);
   buildSliders();
+  buildZernikeOutputs();
   resizeDeck();
   updatePositions();
+  updateZernikeOutputs();
   posVersion++;
   render();
   setControlsReady(true);
@@ -684,6 +839,14 @@ start().catch((error) => {
   setControlsReady(false);
   showLoadingError(buildLoadErrorMessage(error));
 });
+
+if (includeIntrinsicsCheckbox) {
+  includeIntrinsics = !!includeIntrinsicsCheckbox.checked;
+  includeIntrinsicsCheckbox.addEventListener('change', () => {
+    includeIntrinsics = !!includeIntrinsicsCheckbox.checked;
+    updateZernikeOutputs();
+  });
+}
 
 if (copyDiagnosticsBtn) {
   copyDiagnosticsBtn.addEventListener('click', async () => {

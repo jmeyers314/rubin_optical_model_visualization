@@ -49,6 +49,7 @@ pupil_x,pupil_y = batoid.utils.hexapolar(
 
 intra = ssh.fiducial.withGloballyShiftedOptic("Detector", [0, 0, -1.5e-3])
 extra = ssh.fiducial.withGloballyShiftedOptic("Detector", [0, 0, +1.5e-3])
+builder = LSSTBuilder(ssh.fiducial)
 builder_in = LSSTBuilder(intra)
 builder_ex = LSSTBuilder(extra)
 
@@ -58,10 +59,16 @@ yd = np.empty((8, len(pupil_y)))
 SXd = np.empty((8, len(pupil_x), ssh.n_dof))
 SYd = np.empty((8, len(pupil_y), ssh.n_dof))
 
+# Add donut intrinsic and sensitivity Zernikes
+jmax = 28
+zk0 = np.empty((4, jmax+1))
+dzk = np.empty((4, jmax+1, ssh.n_dof))
+
 bar = tqdm(total=ssh.n_dof*8, desc="Generating sensitivity")
 for idof, (step, sign) in enumerate(zip(ssh._steps, ssh.dof_signs)):
     dof = np.zeros(ssh.n_dof)
     dof[idof] = step * sign
+    perturbed = builder.with_aos_dof(dof).build()
     perturbed_in = builder_in.with_aos_dof(dof).build()
     perturbed_ex = builder_ex.with_aos_dof(dof).build()
 
@@ -87,6 +94,20 @@ for idof, (step, sign) in enumerate(zip(ssh._steps, ssh.dof_signs)):
         SXd[i, vignetted, idof] = np.nan
         SYd[i, vignetted, idof] = np.nan
 
+        zkf = batoid.zernikeGQ(
+            ssh.fiducial,
+            np.deg2rad(corner[0]), np.deg2rad(corner[1]),
+            ssh.wavelength,
+            rings=10, jmax=28, eps=0.612
+        ) * ssh.wavelength * 1e9
+        zkp = batoid.zernikeGQ(
+            perturbed,
+            np.deg2rad(corner[0]), np.deg2rad(corner[1]),
+            ssh.wavelength,
+            rings=10, jmax=28, eps=0.612
+        ) * ssh.wavelength * 1e9
+        dzk[i, :, idof] = (zkp - zkf) / step
+
         if idof == 0:
             xd[i] = np.array(frays.x)
             yd[i] = np.array(frays.y)
@@ -104,6 +125,8 @@ for idof, (step, sign) in enumerate(zip(ssh._steps, ssh.dof_signs)):
             dy = sdth * corner[0] + cdth * corner[1]
             xd[i] += dx*1.4
             yd[i] += dy*1.4
+
+            zk0[i] = zkf
 
         bar.update(1)
 
@@ -161,6 +184,9 @@ Sy = Sy.astype(np.float32).reshape(-1, ssh.n_dof)
 SXd = SXd.astype(np.float32).reshape(-1, ssh.n_dof)
 SYd = SYd.astype(np.float32).reshape(-1, ssh.n_dof)
 
+zk0 = zk0.astype(np.float32)
+dzk = dzk.astype(np.float32)
+
 x0 = np.concatenate([x0, xd])
 y0 = np.concatenate([y0, yd])
 
@@ -172,16 +198,28 @@ Sy = Sy.T
 
 N = x0.shape[0]
 K = Sx.shape[0]
+ZK_CORNERS, ZK_TERMS = zk0.shape
 
 init = np.empty(2 * N, dtype=np.float32)
 init[0::2] = x0
 init[1::2] = y0
 
-packed = np.concatenate([init, Sx.ravel(order="C"), Sy.ravel(order="C")])
+sx_flat = Sx.ravel(order="C")
+sy_flat = Sy.ravel(order="C")
+zk0_flat = zk0.ravel(order="C")
+dzk_flat = dzk.ravel(order="C")
+
+init_offset = 0
+sx_offset = init_offset + init.size
+sy_offset = sx_offset + sx_flat.size
+zk0_offset = sy_offset + sy_flat.size
+dzk_offset = zk0_offset + zk0_flat.size
+
+packed = np.concatenate([init, sx_flat, sy_flat, zk0_flat, dzk_flat])
 packed.tofile("model.f32")
 
 meta = {
-    "version": 1,
+    "version": 2,
     "dtype": "float32",
     "N": int(N),
     "K": int(K),
@@ -190,9 +228,11 @@ meta = {
     "default_use_dof": [int(v) for v in ssh.use_dof.tolist()],
     "default_nkeep": int(ssh.nkeep),
     "layout": {
-        "init_xy": {"offset_f32": 0, "length_f32": int(2 * N), "encoding": "xy_interleaved"},
-        "Sx": {"offset_f32": int(2 * N), "length_f32": int(K * N), "shape": [int(K), int(N)], "order": "C"},
-        "Sy": {"offset_f32": int(2 * N + K * N), "length_f32": int(K * N), "shape": [int(K), int(N)], "order": "C"}
+        "init_xy": {"offset_f32": int(init_offset), "length_f32": int(init.size), "encoding": "xy_interleaved"},
+        "Sx": {"offset_f32": int(sx_offset), "length_f32": int(sx_flat.size), "shape": [int(K), int(N)], "order": "C"},
+        "Sy": {"offset_f32": int(sy_offset), "length_f32": int(sy_flat.size), "shape": [int(K), int(N)], "order": "C"},
+        "zk0": {"offset_f32": int(zk0_offset), "length_f32": int(zk0_flat.size), "shape": [int(ZK_CORNERS), int(ZK_TERMS)], "order": "C"},
+        "dzk": {"offset_f32": int(dzk_offset), "length_f32": int(dzk_flat.size), "shape": [int(ZK_CORNERS), int(ZK_TERMS), int(K)], "order": "C"}
     }
 }
 with open("model_meta.json", "w") as f:
