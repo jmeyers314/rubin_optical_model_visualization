@@ -1,4 +1,7 @@
-const {DeckGL, OrthographicView, ScatterplotLayer, COORDINATE_SYSTEM} = window.deck;
+let DeckGL;
+let OrthographicView;
+let ScatterplotLayer;
+let COORDINATE_SYSTEM;
 
 let N;
 const WORLD_RADIUS = 2;
@@ -37,6 +40,32 @@ let x0, y0, Sx, Sy;
 let modelRadius = WORLD_RADIUS;
 let positions = new Float32Array(0);
 let data = [];
+const loadTelemetry = {
+  startupStartIso: null,
+  startupEndIso: null,
+  startupDurationMs: null,
+  metaFetchDurationMs: null,
+  metaBytes: null,
+  metaHttpStatus: null,
+  modelFetchDurationMs: null,
+  modelBytesExpected: null,
+  modelBytesReceived: null,
+  modelHttpStatus: null,
+  modelUsedStreamReader: null,
+  modelDownloadCompleted: false,
+};
+
+function nowMs() {
+  if (typeof performance !== 'undefined' && performance && typeof performance.now === 'function') {
+    return performance.now();
+  }
+  return Date.now();
+}
+
+function formatDuration(value) {
+  if (!Number.isFinite(value) || value < 0) return 'unknown';
+  return value.toFixed(1);
+}
 
 function estimateRadius(x, y) {
   let maxR2 = 0;
@@ -48,14 +77,14 @@ function estimateRadius(x, y) {
 }
 
 function getControlSpec(index) {
-  const label = CONTROL_NAMES[index] ?? `p${index}`;
-  const range = CONTROL_RANGES[index] ?? 1;
+  const label = CONTROL_NAMES[index] != null ? CONTROL_NAMES[index] : `p${index}`;
+  const range = CONTROL_RANGES[index] != null ? CONTROL_RANGES[index] : 1;
   const step = Math.max(range / 200, 1e-4);
   return {label, range, step};
 }
 
 function clampControlValue(index, value) {
-  const range = CONTROL_RANGES[index] ?? Infinity;
+  const range = CONTROL_RANGES[index] != null ? CONTROL_RANGES[index] : Infinity;
   return Math.max(-range, Math.min(range, value));
 }
 
@@ -64,7 +93,14 @@ function formatControlValue(value) {
 }
 
 async function loadPackedModel(metaUrl, modelUrl) {
+  const metaStart = nowMs();
   const metaResponse = await fetch(metaUrl);
+  loadTelemetry.metaHttpStatus = metaResponse.status;
+  const metaEnd = nowMs();
+  loadTelemetry.metaFetchDurationMs = Math.max(0, metaEnd - metaStart);
+  const metaLengthHeader = metaResponse.headers.get('content-length');
+  const metaBytes = metaLengthHeader ? Number(metaLengthHeader) : NaN;
+  loadTelemetry.metaBytes = Number.isFinite(metaBytes) && metaBytes >= 0 ? metaBytes : null;
   if (!metaResponse.ok) {
     throw new Error(`Failed to load ${metaUrl}: ${metaResponse.status} ${metaResponse.statusText}`);
   }
@@ -79,9 +115,10 @@ async function loadPackedModel(metaUrl, modelUrl) {
     throw new Error('Metadata must contain positive integer N and K');
   }
 
-  const initSpec = meta.layout?.init_xy;
-  const sxSpec = meta.layout?.Sx;
-  const sySpec = meta.layout?.Sy;
+  const layout = meta && meta.layout ? meta.layout : null;
+  const initSpec = layout ? layout.init_xy : undefined;
+  const sxSpec = layout ? layout.Sx : undefined;
+  const sySpec = layout ? layout.Sy : undefined;
   if (!initSpec || !sxSpec || !sySpec) {
     throw new Error('Metadata layout must include init_xy, Sx, and Sy blocks');
   }
@@ -129,18 +166,30 @@ async function loadPackedModel(metaUrl, modelUrl) {
 }
 
 async function fetchArrayBufferWithProgress(url, onProgress) {
+  const fetchStart = nowMs();
   const response = await fetch(url);
+  loadTelemetry.modelHttpStatus = response.status;
   if (!response.ok) {
     throw new Error(`Failed to load ${url}: ${response.status} ${response.statusText}`);
   }
 
   const totalHeader = response.headers.get('content-length');
   const totalBytes = totalHeader ? Number(totalHeader) : NaN;
-  const reader = response.body?.getReader?.();
+  loadTelemetry.modelBytesExpected = Number.isFinite(totalBytes) && totalBytes >= 0 ? totalBytes : null;
+  const responseBody = response.body;
+  const reader = responseBody && typeof responseBody.getReader === 'function'
+    ? responseBody.getReader()
+    : null;
+  loadTelemetry.modelUsedStreamReader = !!reader;
 
   if (!reader) {
     const fallback = await response.arrayBuffer();
-    onProgress?.(fallback.byteLength, fallback.byteLength, true);
+    loadTelemetry.modelBytesReceived = fallback.byteLength;
+    loadTelemetry.modelDownloadCompleted = true;
+    loadTelemetry.modelFetchDurationMs = Math.max(0, nowMs() - fetchStart);
+    if (typeof onProgress === 'function') {
+      onProgress(fallback.byteLength, fallback.byteLength, true);
+    }
     return fallback;
   }
 
@@ -152,7 +201,10 @@ async function fetchArrayBufferWithProgress(url, onProgress) {
     if (value) {
       chunks.push(value);
       receivedBytes += value.byteLength;
-      onProgress?.(receivedBytes, totalBytes, false);
+      loadTelemetry.modelBytesReceived = receivedBytes;
+      if (typeof onProgress === 'function') {
+        onProgress(receivedBytes, totalBytes, false);
+      }
     }
   }
 
@@ -163,7 +215,12 @@ async function fetchArrayBufferWithProgress(url, onProgress) {
     offset += chunk.byteLength;
   }
 
-  onProgress?.(receivedBytes, totalBytes, true);
+  if (typeof onProgress === 'function') {
+    onProgress(receivedBytes, totalBytes, true);
+  }
+  loadTelemetry.modelBytesReceived = receivedBytes;
+  loadTelemetry.modelDownloadCompleted = true;
+  loadTelemetry.modelFetchDurationMs = Math.max(0, nowMs() - fetchStart);
   return merged.buffer;
 }
 
@@ -219,6 +276,8 @@ const scaleBarLineEl = document.getElementById('scale-bar-line');
 const loadingOverlayEl = document.getElementById('loading-overlay');
 const loadingFillEl = document.getElementById('loading-fill');
 const loadingTextEl = document.getElementById('loading-text');
+const copyDiagnosticsBtn = document.getElementById('copy-diagnostics');
+const copyDiagnosticsStatusEl = document.getElementById('copy-diagnostics-status');
 const SCALE_BAR_WORLD_UNITS = 0.24;
 const GRID_PITCH_WORLD_UNITS = 0.048;
 const GRID_MAJOR_EVERY = 5;
@@ -227,6 +286,8 @@ const GRID_MAJOR_COLOR = 'rgba(122, 178, 255, 0.05)';
 let sliderInputs = [];
 let sliderValues = [];
 let currentViewState = { target: [0, 0, 0], zoom: 0 };
+let deckgl = null;
+let lastStartupError = '';
 
 function setControlsReady(ready) {
   if (!resetControlsBtn) return;
@@ -270,13 +331,126 @@ function showLoadingError(errorMessage) {
   loadingTextEl.textContent = errorMessage;
 }
 
-const deckgl = new DeckGL({
-  canvas,
-  views: [new OrthographicView({id: 'ortho'})],
-  initialViewState: { target: [0, 0, 0], zoom: 0 },
-  controller: false,
-  layers: []
-});
+function setCopyDiagnosticsStatus(message) {
+  if (!copyDiagnosticsStatusEl) return;
+  copyDiagnosticsStatusEl.textContent = message;
+}
+
+function initializeDeck() {
+  if (!window.deck) {
+    throw new Error('Visualization library failed to load (deck.gl script unavailable).');
+  }
+
+  DeckGL = window.deck.DeckGL;
+  OrthographicView = window.deck.OrthographicView;
+  ScatterplotLayer = window.deck.ScatterplotLayer;
+  COORDINATE_SYSTEM = window.deck.COORDINATE_SYSTEM;
+
+  if (!DeckGL || !OrthographicView || !ScatterplotLayer || !COORDINATE_SYSTEM) {
+    throw new Error('Visualization library loaded incompletely.');
+  }
+
+  deckgl = new DeckGL({
+    canvas,
+    views: [new OrthographicView({id: 'ortho'})],
+    initialViewState: { target: [0, 0, 0], zoom: 0 },
+    controller: false,
+    layers: []
+  });
+}
+
+function getCompatibilityIssues() {
+  const issues = [];
+
+  if (typeof window.fetch !== 'function') issues.push('missing Fetch API');
+  if (typeof window.Promise !== 'function') issues.push('missing Promise support');
+  if (typeof window.Float32Array !== 'function') issues.push('missing typed array support');
+  if (typeof window.requestAnimationFrame !== 'function') issues.push('missing animation frame support');
+  if (!canvas || typeof canvas.getContext !== 'function') {
+    issues.push('missing canvas support');
+    return issues;
+  }
+
+  const gl = canvas.getContext('webgl2') || canvas.getContext('webgl');
+  if (!gl) issues.push('WebGL unavailable');
+
+  return issues;
+}
+
+function buildDiagnosticsText() {
+  const issues = getCompatibilityIssues();
+  const navigatorInfo = typeof navigator !== 'undefined' ? navigator : null;
+  const locationInfo = typeof window !== 'undefined' ? window.location : null;
+  const webgl2Supported = canvas && canvas.getContext ? !!canvas.getContext('webgl2') : false;
+  const webglSupported = canvas && canvas.getContext
+    ? (!!canvas.getContext('webgl') || !!canvas.getContext('experimental-webgl'))
+    : false;
+
+  const rows = [
+    `timestamp_utc: ${new Date().toISOString()}`,
+    `user_agent: ${navigatorInfo && navigatorInfo.userAgent ? navigatorInfo.userAgent : 'unknown'}`,
+    `language: ${navigatorInfo && navigatorInfo.language ? navigatorInfo.language : 'unknown'}`,
+    `platform: ${navigatorInfo && navigatorInfo.platform ? navigatorInfo.platform : 'unknown'}`,
+    `url: ${locationInfo && locationInfo.href ? locationInfo.href : 'unknown'}`,
+    `protocol: ${locationInfo && locationInfo.protocol ? locationInfo.protocol : 'unknown'}`,
+    `deck_global_present: ${!!window.deck}`,
+    `fetch_supported: ${typeof window.fetch === 'function'}`,
+    `promise_supported: ${typeof window.Promise === 'function'}`,
+    `typedarray_supported: ${typeof window.Float32Array === 'function'}`,
+    `raf_supported: ${typeof window.requestAnimationFrame === 'function'}`,
+    `webgl2_supported: ${webgl2Supported}`,
+    `webgl_supported: ${webglSupported}`,
+    `compatibility_issues: ${issues.length ? issues.join('; ') : 'none'}`,
+    `startup_started_utc: ${loadTelemetry.startupStartIso || 'unknown'}`,
+    `startup_finished_utc: ${loadTelemetry.startupEndIso || 'unknown'}`,
+    `startup_duration_ms: ${formatDuration(loadTelemetry.startupDurationMs)}`,
+    `meta_http_status: ${loadTelemetry.metaHttpStatus != null ? loadTelemetry.metaHttpStatus : 'unknown'}`,
+    `meta_fetch_duration_ms: ${formatDuration(loadTelemetry.metaFetchDurationMs)}`,
+    `meta_content_length_bytes: ${loadTelemetry.metaBytes != null ? loadTelemetry.metaBytes : 'unknown'}`,
+    `model_http_status: ${loadTelemetry.modelHttpStatus != null ? loadTelemetry.modelHttpStatus : 'unknown'}`,
+    `model_fetch_duration_ms: ${formatDuration(loadTelemetry.modelFetchDurationMs)}`,
+    `model_content_length_bytes: ${loadTelemetry.modelBytesExpected != null ? loadTelemetry.modelBytesExpected : 'unknown'}`,
+    `model_bytes_received: ${loadTelemetry.modelBytesReceived != null ? loadTelemetry.modelBytesReceived : 'unknown'}`,
+    `model_streaming_reader_used: ${loadTelemetry.modelUsedStreamReader != null ? loadTelemetry.modelUsedStreamReader : 'unknown'}`,
+    `model_download_completed: ${loadTelemetry.modelDownloadCompleted}`,
+    `last_startup_error: ${lastStartupError || 'none'}`,
+  ];
+
+  return rows.join('\n');
+}
+
+async function copyDiagnosticsToClipboard() {
+  const text = buildDiagnosticsText();
+
+  if (navigator && navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    await navigator.clipboard.writeText(text);
+    return true;
+  }
+
+  return false;
+}
+
+function buildLoadErrorMessage(error) {
+  const raw = error && error.message ? error.message : String(error);
+
+  if (/missing|unavailable|unsupported|WebGL/i.test(raw)) {
+    return `Browser compatibility error: ${raw}. Please update your browser and ensure hardware acceleration is enabled.`;
+  }
+
+  if (/deck\.gl|Visualization library/i.test(raw)) {
+    return `${raw} This can happen if the CDN script is blocked by a network policy, ad blocker, or privacy extension.`;
+  }
+
+  if (/Failed to fetch|NetworkError|Load failed/i.test(raw)) {
+    return `Network error while downloading model files: ${raw}. Check connection quality, proxy/firewall settings, and that the page is served over HTTP(S).`;
+  }
+
+  if (/Metadata|Packed model|N\/K/i.test(raw)) {
+    return `Model data error: ${raw}. The model files may be incomplete or from mismatched versions.`;
+  }
+
+  return `Load failed: ${raw}`;
+}
 
 function getFitZoom(width, height, radius) {
   const diameter = Math.max(1e-6, 2 * radius);
@@ -298,11 +472,13 @@ function resizeDeck() {
   currentViewState = { target: [0, 0, 0], zoom };
   drawGrid(r.width, r.height);
   updateScaleBar();
-  deckgl.setProps({
-    width: r.width,
-    height: r.height,
-    viewState: currentViewState
-  });
+  if (deckgl) {
+    deckgl.setProps({
+      width: r.width,
+      height: r.height,
+      viewState: currentViewState
+    });
+  }
 }
 
 function drawGrid(width, height) {
@@ -388,6 +564,8 @@ function clearMouseCoords() {
 let posVersion = 0;
 
 function render() {
+  if (!deckgl || !ScatterplotLayer || !COORDINATE_SYSTEM) return;
+
   const layer = new ScatterplotLayer({
     id: 'pts',
     data,
@@ -466,8 +644,20 @@ function resetControls() {
 }
 
 async function start() {
+  const startupStart = nowMs();
+  loadTelemetry.startupStartIso = new Date().toISOString();
+  loadTelemetry.startupEndIso = null;
+  loadTelemetry.startupDurationMs = null;
+  loadTelemetry.modelDownloadCompleted = false;
   setControlsReady(false);
   updateLoadingProgress(0, NaN, false);
+
+  const compatibilityIssues = getCompatibilityIssues();
+  if (compatibilityIssues.length) {
+    throw new Error(`unsupported browser features: ${compatibilityIssues.join(', ')}`);
+  }
+
+  initializeDeck();
   const model = await loadPackedModel('./model_meta.json', './model.f32');
 
   initModel(model.x, model.y, model.sx, model.sy, model.k);
@@ -477,13 +667,47 @@ async function start() {
   posVersion++;
   render();
   setControlsReady(true);
+  loadTelemetry.startupEndIso = new Date().toISOString();
+  loadTelemetry.startupDurationMs = Math.max(0, nowMs() - startupStart);
 }
 
 start().catch((error) => {
+  loadTelemetry.startupEndIso = new Date().toISOString();
+  if (loadTelemetry.startupStartIso && !Number.isFinite(loadTelemetry.startupDurationMs)) {
+    const fallbackStart = Date.parse(loadTelemetry.startupStartIso);
+    if (Number.isFinite(fallbackStart)) {
+      loadTelemetry.startupDurationMs = Math.max(0, Date.now() - fallbackStart);
+    }
+  }
+  lastStartupError = error && error.message ? error.message : String(error);
   console.error(error);
   setControlsReady(false);
-  showLoadingError(`Load failed: ${error.message}`);
+  showLoadingError(buildLoadErrorMessage(error));
 });
+
+if (copyDiagnosticsBtn) {
+  copyDiagnosticsBtn.addEventListener('click', async () => {
+    setCopyDiagnosticsStatus('');
+    copyDiagnosticsBtn.disabled = true;
+
+    try {
+      const copied = await copyDiagnosticsToClipboard();
+      if (copied) {
+        setCopyDiagnosticsStatus('Copied');
+      } else {
+        const text = buildDiagnosticsText();
+        window.prompt('Copy diagnostics:', text);
+        setCopyDiagnosticsStatus('Opened copy dialog');
+      }
+    } catch (error) {
+      const text = buildDiagnosticsText();
+      window.prompt('Copy diagnostics:', text);
+      setCopyDiagnosticsStatus('Clipboard blocked; opened dialog');
+    } finally {
+      copyDiagnosticsBtn.disabled = false;
+    }
+  });
+}
 
 window.addEventListener('resize', () => { resizeDeck(); render(); });
 
