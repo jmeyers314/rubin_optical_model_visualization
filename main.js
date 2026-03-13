@@ -36,6 +36,8 @@ const CONTROL_RANGES = [
 let K = CONTROL_NAMES.length;
 const DONUT_CORNERS = 4;
 const DONUT_ZERNIKE_TERMS = 29;
+const WHEEL_ZOOM_SENSITIVITY = 0.0008;
+const WHEEL_ZOOM_MAX_STEP = 0.12;
 
 let p = new Float32Array(K);
 let x0, y0, Sx, Sy;
@@ -317,6 +319,9 @@ const loadingFillEl = document.getElementById('loading-fill');
 const loadingTextEl = document.getElementById('loading-text');
 const copyDiagnosticsBtn = document.getElementById('copy-diagnostics');
 const copyDiagnosticsStatusEl = document.getElementById('copy-diagnostics-status');
+const zoomInBtn = document.getElementById('zoom-in');
+const zoomOutBtn = document.getElementById('zoom-out');
+const zoomResetBtn = document.getElementById('zoom-reset');
 const SCALE_BAR_WORLD_UNITS = 0.24;
 const GRID_PITCH_WORLD_UNITS = 0.048;
 const GRID_MAJOR_EVERY = 5;
@@ -346,11 +351,14 @@ const ZERNIKE_DISPLAY_ROWS = [
 ];
 let sliderInputs = [];
 let parameterInputs = [];
-let currentViewState = { target: [0, 0, 0], zoom: 0 };
+let currentViewState = { target: [0, 0, 0], zoom: Number.NaN };
 let deckgl = null;
 let lastStartupError = '';
 let zernikeCornerEls = [];
 let includeIntrinsics = true;
+let isDraggingView = false;
+let dragLastClientX = 0;
+let dragLastClientY = 0;
 
 function setControlsReady(ready) {
   if (!resetControlsBtn) return;
@@ -611,6 +619,50 @@ function getFitZoom(width, height, radius) {
   return Math.log2(scale);
 }
 
+function getFitViewState() {
+  const r = vis.getBoundingClientRect();
+  const zoom = getFitZoom(r.width, r.height, modelRadius);
+  return {target: [0, 0, 0], zoom};
+}
+
+function applyViewState() {
+  const r = vis.getBoundingClientRect();
+  drawGrid(r.width, r.height);
+  updateScaleBar();
+  if (deckgl) {
+    deckgl.setProps({ viewState: currentViewState });
+  }
+}
+
+function setZoom(nextZoom) {
+  const clampedZoom = Math.max(-4, Math.min(18, nextZoom));
+  currentViewState = {
+    target: currentViewState.target,
+    zoom: clampedZoom
+  };
+  applyViewState();
+}
+
+function zoomBy(delta) {
+  setZoom(currentViewState.zoom + delta);
+}
+
+function resetView() {
+  currentViewState = getFitViewState();
+  applyViewState();
+}
+
+function panByPixels(deltaX, deltaY) {
+  const scale = Math.pow(2, currentViewState.zoom);
+  const targetX = currentViewState.target[0] - deltaX / scale;
+  const targetY = currentViewState.target[1] - deltaY / scale;
+  currentViewState = {
+    target: [targetX, targetY, 0],
+    zoom: currentViewState.zoom
+  };
+  applyViewState();
+}
+
 function resizeDeck() {
   const r = vis.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
@@ -620,8 +672,9 @@ function resizeDeck() {
   }
   canvas.width  = Math.max(1, Math.floor(r.width  * dpr));
   canvas.height = Math.max(1, Math.floor(r.height * dpr));
-  const zoom = getFitZoom(r.width, r.height, modelRadius);
-  currentViewState = { target: [0, 0, 0], zoom };
+  if (!Number.isFinite(currentViewState.zoom)) {
+    currentViewState = getFitViewState();
+  }
   drawGrid(r.width, r.height);
   updateScaleBar();
   if (deckgl) {
@@ -939,6 +992,53 @@ if (resetControlsBtn) {
 
 vis.addEventListener('mousemove', updateMouseCoords);
 vis.addEventListener('mouseleave', clearMouseCoords);
+vis.addEventListener('wheel', (event) => {
+  event.preventDefault();
+  const rawStep = -event.deltaY * WHEEL_ZOOM_SENSITIVITY;
+  const zoomStep = Math.max(-WHEEL_ZOOM_MAX_STEP, Math.min(WHEEL_ZOOM_MAX_STEP, rawStep));
+  zoomBy(zoomStep);
+}, {passive: false});
+
+vis.addEventListener('mousedown', (event) => {
+  if (event.button !== 0) return;
+  isDraggingView = true;
+  dragLastClientX = event.clientX;
+  dragLastClientY = event.clientY;
+  vis.style.cursor = 'grabbing';
+});
+
+vis.addEventListener('mousemove', (event) => {
+  if (!isDraggingView) return;
+  const dx = event.clientX - dragLastClientX;
+  const dy = event.clientY - dragLastClientY;
+  dragLastClientX = event.clientX;
+  dragLastClientY = event.clientY;
+  panByPixels(dx, dy);
+});
+
+window.addEventListener('mouseup', () => {
+  if (!isDraggingView) return;
+  isDraggingView = false;
+  vis.style.cursor = '';
+});
+
+vis.addEventListener('mouseleave', () => {
+  if (!isDraggingView) return;
+  isDraggingView = false;
+  vis.style.cursor = '';
+});
+
+if (zoomInBtn) {
+  zoomInBtn.addEventListener('click', () => zoomBy(0.3));
+}
+
+if (zoomOutBtn) {
+  zoomOutBtn.addEventListener('click', () => zoomBy(-0.3));
+}
+
+if (zoomResetBtn) {
+  zoomResetBtn.addEventListener('click', resetView);
+}
 
 window.addEventListener('keydown', (event) => {
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
@@ -947,5 +1047,20 @@ window.addEventListener('keydown', (event) => {
   if (event.key === 'r' || event.key === 'R') {
     event.preventDefault();
     resetControls();
+    return;
+  }
+  if (event.key === '+' || event.key === '=') {
+    event.preventDefault();
+    zoomBy(0.3);
+    return;
+  }
+  if (event.key === '-') {
+    event.preventDefault();
+    zoomBy(-0.3);
+    return;
+  }
+  if (event.key === '0') {
+    event.preventDefault();
+    resetView();
   }
 });

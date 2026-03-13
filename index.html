@@ -125,6 +125,34 @@
       pointer-events: none;
       opacity: 0.9;
     }
+    .zoom-controls {
+      position: absolute;
+      right: 10px;
+      top: 38px;
+      z-index: 6;
+      display: flex;
+      gap: 6px;
+      pointer-events: auto;
+    }
+    .zoom-btn {
+      border: 1px solid rgba(215, 231, 255, 0.75);
+      background: rgba(11, 15, 20, 0.55);
+      color: #d7e7ff;
+      border-radius: 4px;
+      width: 28px;
+      height: 24px;
+      padding: 0;
+      font-size: 15px;
+      line-height: 1;
+      cursor: pointer;
+      font-family: ui-monospace, Menlo, monospace;
+    }
+    .zoom-btn.wide {
+      width: auto;
+      min-width: 46px;
+      padding: 0 8px;
+      font-size: 11px;
+    }
     .scale-bar {
       position: absolute;
       left: 10px;
@@ -246,6 +274,11 @@
     </div>
     <div class="axis-labels" aria-hidden="true">y ↑<br>x →</div>
     <div id="mouse-coords" class="mouse-coords" aria-hidden="true">x: ---, y: ---</div>
+    <div class="zoom-controls" aria-label="Zoom controls">
+      <button id="zoom-in" class="zoom-btn" type="button" title="Zoom in">+</button>
+      <button id="zoom-out" class="zoom-btn" type="button" title="Zoom out">−</button>
+      <button id="zoom-reset" class="zoom-btn wide" type="button" title="Reset zoom">Reset</button>
+    </div>
     <div id="zernike-overlay" class="zernike-overlay" aria-hidden="true"></div>
     <div class="scale-bar" aria-hidden="true">
       <div id="scale-bar-line" class="scale-bar-line"></div>
