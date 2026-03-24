@@ -46,6 +46,18 @@ let dZk = new Float32Array(0);
 let modelRadius = WORLD_RADIUS;
 let positions = new Float32Array(0);
 let data = [];
+
+// Vmode state
+let norm = null;          // Float64Array(K) — normalization weights
+let wfSens = null;        // Float32Array — wavefront sensitivity matrix (nObs × K)
+let wfSensRows = 0;       // number of observation rows in wfSens
+let currentUseDof = [];   // Int array of active DOF indices
+let currentNkeep = 12;
+let Vh = null;            // Float64Array — (nkeep × nActive) mixing matrix
+let nActive = 0;          // len(currentUseDof)
+let vValues = [];         // current vmode slider values
+let vmodeSliderInputs = [];
+let vmodeParamInputs = [];
 const loadTelemetry = {
   startupStartIso: null,
   startupEndIso: null,
@@ -96,6 +108,157 @@ function clampControlValue(index, value) {
 
 function formatControlValue(value) {
   return value.toFixed(VALUE_DECIMALS);
+}
+
+// --- use_dof string parser (mirrors Python StateFactory) ---
+function parseUseDof(s) {
+  if (typeof s !== 'string') return [];
+  s = s.replace(/\s/g, '').trim();
+  if (!s) return [];
+  const result = [];
+  for (const part of s.split(',')) {
+    if (part.includes('-')) {
+      const [a, b] = part.split('-').map(Number);
+      if (!Number.isInteger(a) || !Number.isInteger(b)) continue;
+      for (let i = a; i <= b; i++) result.push(i);
+    } else {
+      const v = Number(part);
+      if (Number.isInteger(v)) result.push(v);
+    }
+  }
+  return [...new Set(result)].sort((a, b) => a - b);
+}
+
+// --- Format sorted int array back to compact range string ---
+function formatUseDof(arr) {
+  if (!arr || arr.length === 0) return '';
+  const parts = [];
+  let start = arr[0], end = arr[0];
+  for (let i = 1; i < arr.length; i++) {
+    if (arr[i] === end + 1) {
+      end = arr[i];
+    } else {
+      parts.push(start === end ? String(start) : `${start}-${end}`);
+      start = arr[i];
+      end = arr[i];
+    }
+  }
+  parts.push(start === end ? String(start) : `${start}-${end}`);
+  return parts.join(',');
+}
+
+// --- Jacobi eigendecomposition for real symmetric matrix ---
+function jacobiEigen(G, maxIter) {
+  const n = Math.round(Math.sqrt(G.length));
+  if (n * n !== G.length) throw new Error('jacobiEigen: not a square matrix');
+  if (typeof maxIter !== 'number') maxIter = 100 * n * n;
+
+  // Copy G into A (we'll destroy it)
+  const A = new Float64Array(G);
+  // V starts as identity
+  const V = new Float64Array(n * n);
+  for (let i = 0; i < n; i++) V[i * n + i] = 1;
+
+  for (let iter = 0; iter < maxIter; iter++) {
+    // Find largest off-diagonal element
+    let maxVal = 0, ip = 0, iq = 0;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const v = Math.abs(A[i * n + j]);
+        if (v > maxVal) { maxVal = v; ip = i; iq = j; }
+      }
+    }
+    if (maxVal < 1e-15) break;
+
+    const aij = A[ip * n + iq];
+    const aii = A[ip * n + ip];
+    const ajj = A[iq * n + iq];
+    const theta = 0.5 * Math.atan2(2 * aij, aii - ajj);
+    const c = Math.cos(theta);
+    const s = Math.sin(theta);
+
+    // Rotate rows/cols ip, iq of A
+    for (let k = 0; k < n; k++) {
+      const aik = A[ip * n + k];
+      const ajk = A[iq * n + k];
+      A[ip * n + k] = c * aik + s * ajk;
+      A[iq * n + k] = -s * aik + c * ajk;
+    }
+    for (let k = 0; k < n; k++) {
+      const aki = A[k * n + ip];
+      const akj = A[k * n + iq];
+      A[k * n + ip] = c * aki + s * akj;
+      A[k * n + iq] = -s * aki + c * akj;
+    }
+
+    // Accumulate V
+    for (let k = 0; k < n; k++) {
+      const vki = V[k * n + ip];
+      const vkj = V[k * n + iq];
+      V[k * n + ip] = c * vki + s * vkj;
+      V[k * n + iq] = -s * vki + c * vkj;
+    }
+  }
+
+  // Extract eigenvalues from diagonal of A
+  const eigenvalues = new Float64Array(n);
+  for (let i = 0; i < n; i++) eigenvalues[i] = A[i * n + i];
+
+  // Sort by decreasing eigenvalue, return eigenvectors as columns of V
+  const order = Array.from({length: n}, (_, i) => i);
+  order.sort((a, b) => eigenvalues[b] - eigenvalues[a]);
+
+  const sortedVals = new Float64Array(n);
+  const sortedVecs = new Float64Array(n * n); // each column is an eigenvector
+  for (let rank = 0; rank < n; rank++) {
+    const orig = order[rank];
+    sortedVals[rank] = eigenvalues[orig];
+    for (let row = 0; row < n; row++) {
+      sortedVecs[row * n + rank] = V[row * n + orig];
+    }
+  }
+
+  return {values: sortedVals, vectors: sortedVecs};
+}
+
+// --- Compute Vh from wavefront sensitivity, norm, useDof, nkeep ---
+// Mirrors StateFactory.__init__() from state.py
+function computeVh(sens, sensRows, sensK, normArr, useDof, nkeep) {
+  const nAct = useDof.length;
+  if (nAct === 0 || nkeep <= 0) return null;
+
+  // A_norm = sens * diag(norm)  (column scaling)
+  // A_sliced = A_norm[:, useDof]
+  // G = A_sliced^T @ A_sliced   (nAct x nAct)
+  const G = new Float64Array(nAct * nAct);
+  for (let i = 0; i < nAct; i++) {
+    for (let j = i; j < nAct; j++) {
+      let dot = 0;
+      const di = useDof[i];
+      const dj = useDof[j];
+      const ni = normArr[di];
+      const nj = normArr[dj];
+      for (let r = 0; r < sensRows; r++) {
+        dot += (sens[r * sensK + di] * ni) * (sens[r * sensK + dj] * nj);
+      }
+      G[i * nAct + j] = dot;
+      G[j * nAct + i] = dot;
+    }
+  }
+
+  const {vectors} = jacobiEigen(G);
+
+  // Vh = top nkeep eigenvectors as rows, denormalized
+  // vectors is column-major: vectors[row * nAct + col] where col = eigenvector index
+  const nk = Math.min(nkeep, nAct);
+  const result = new Float64Array(nk * nAct);
+  for (let mode = 0; mode < nk; mode++) {
+    for (let j = 0; j < nAct; j++) {
+      // eigenvector `mode` component `j` is vectors[j * nAct + mode]
+      result[mode * nAct + j] = vectors[j * nAct + mode] * normArr[useDof[j]];
+    }
+  }
+  return result;
 }
 
 async function loadPackedModel(metaUrl, modelUrl) {
@@ -184,6 +347,27 @@ async function loadPackedModel(metaUrl, modelUrl) {
   const loadedZk0 = new Float32Array(packed.subarray(zk0Offset, zk0Offset + zk0Length));
   const loadedDzk = new Float32Array(packed.subarray(dzkOffset, dzkOffset + dzkLength));
 
+  // Load wavefront sensitivity matrix (for vmode computation)
+  let loadedWfSens = null;
+  let loadedWfSensRows = 0;
+  const wfSensSpec = layout ? layout.wf_sens : undefined;
+  if (wfSensSpec) {
+    const wsOffset = Number(wfSensSpec.offset_f32);
+    const wsLength = Number(wfSensSpec.length_f32);
+    loadedWfSens = new Float32Array(packed.subarray(wsOffset, wsOffset + wsLength));
+    loadedWfSensRows = wfSensSpec.shape ? wfSensSpec.shape[0] : 0;
+  }
+
+  // Load norm from meta (JSON array)
+  let loadedNorm = null;
+  if (Array.isArray(meta.norm)) {
+    loadedNorm = new Float64Array(meta.norm);
+  }
+
+  // Load defaults
+  const defaultUseDof = Array.isArray(meta.default_use_dof) ? meta.default_use_dof : [];
+  const defaultNkeep = Number.isInteger(meta.default_nkeep) ? meta.default_nkeep : 12;
+
   return {
     x,
     y,
@@ -191,7 +375,12 @@ async function loadPackedModel(metaUrl, modelUrl) {
     sy: loadedSy,
     zk0: loadedZk0,
     dzk: loadedDzk,
-    k
+    k,
+    wfSens: loadedWfSens,
+    wfSensRows: loadedWfSensRows,
+    norm: loadedNorm,
+    defaultUseDof,
+    defaultNkeep
   };
 }
 
@@ -905,7 +1094,174 @@ function resetControls() {
     if (sliderInputs[k]) sliderInputs[k].value = '0';
     if (parameterInputs[k]) parameterInputs[k].value = formatControlValue(0);
   }
+  // Reset vmode sliders
+  for (let i = 0; i < vValues.length; i++) {
+    vValues[i] = 0;
+    if (vmodeSliderInputs[i]) vmodeSliderInputs[i].value = '0';
+    if (vmodeParamInputs[i]) vmodeParamInputs[i].value = formatControlValue(0);
+  }
   requestUpdate();
+}
+
+function recomputeVmodes() {
+  const useDofInput = document.getElementById('use-dof-input');
+  const nkeepInput = document.getElementById('nkeep-input');
+  if (!useDofInput || !nkeepInput) return;
+
+  currentUseDof = parseUseDof(useDofInput.value);
+  nActive = currentUseDof.length;
+  currentNkeep = Math.max(1, Math.min(nActive, Number(nkeepInput.value) || 12));
+  nkeepInput.value = String(currentNkeep);
+
+  if (norm && wfSens && nActive > 0) {
+    Vh = computeVh(wfSens, wfSensRows, K, norm, currentUseDof, currentNkeep);
+  } else {
+    Vh = null;
+  }
+
+  // Reset vmode values and rebuild sliders
+  vValues = new Array(currentNkeep).fill(0);
+  buildVmodeSliders();
+}
+
+function buildVmodeSliders() {
+  const root = document.getElementById('vmode-sliders');
+  if (!root) return;
+  root.innerHTML = '';
+  vmodeSliderInputs = [];
+  vmodeParamInputs = [];
+
+  if (!Vh || currentNkeep <= 0) return;
+
+  // Compute per-mode RMS spot displacement for unit vmode value,
+  // then set range so full deflection ≈ 10 camera pixels (= 10 * GRID_PITCH_WORLD_UNITS).
+  const TARGET_DISPLACEMENT = 5 * GRID_PITCH_WORLD_UNITS;
+  const vmodeRanges = new Float64Array(currentNkeep);
+  for (let m = 0; m < currentNkeep; m++) {
+    const rowOff = m * nActive;
+    let sumSq = 0;
+    let count = 0;
+    for (let i = 0; i < N; i++) {
+      let dx = 0, dy = 0;
+      let hasNaN = false;
+      for (let j = 0; j < nActive; j++) {
+        const dofIdx = currentUseDof[j];
+        const vhVal = Vh[rowOff + j];
+        const sxi = Sx[dofIdx * N + i];
+        const syi = Sy[dofIdx * N + i];
+        if (!(isFinite(sxi) && isFinite(syi))) { hasNaN = true; break; }
+        dx += sxi * vhVal;
+        dy += syi * vhVal;
+      }
+      if (hasNaN) continue;
+      sumSq += dx * dx + dy * dy;
+      count++;
+    }
+    const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
+    const dispRange = rms > 1e-15 ? TARGET_DISPLACEMENT / rms : Infinity;
+
+    // Also limit range so that, starting from zero, no active DOF ever hits
+    // its CONTROL_RANGES limit. Cap = min over j of (range_j / |Vh[m][j]|).
+    let dofCapRange = Infinity;
+    for (let j = 0; j < nActive; j++) {
+      const dofIdx = currentUseDof[j];
+      const absVh = Math.abs(Vh[rowOff + j]);
+      if (absVh > 1e-15) {
+        const dofRange = CONTROL_RANGES[dofIdx] != null ? CONTROL_RANGES[dofIdx] : Infinity;
+        dofCapRange = Math.min(dofCapRange, dofRange / absVh);
+      }
+    }
+
+    vmodeRanges[m] = Math.min(dispRange, isFinite(dofCapRange) ? dofCapRange : dispRange);
+    if (!isFinite(vmodeRanges[m]) || vmodeRanges[m] <= 0) vmodeRanges[m] = 1;
+  }
+
+  for (let m = 0; m < currentNkeep; m++) {
+    const row = document.createElement('div');
+    row.className = 'row';
+
+    const label = document.createElement('label');
+    label.textContent = `V${m + 1}`;
+
+    const modeRange = vmodeRanges[m];
+    const VMODE_STEP = Math.max(modeRange / 200, 1e-6);
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = String(-modeRange);
+    slider.max = String(modeRange);
+    slider.step = String(VMODE_STEP);
+    slider.value = '0';
+
+    const numInput = document.createElement('input');
+    numInput.type = 'number';
+    numInput.min = String(-modeRange);
+    numInput.max = String(modeRange);
+    numInput.step = String(VMODE_STEP);
+    numInput.value = formatControlValue(0);
+
+    const modeIndex = m; // capture for closure
+
+    function applyVmodeDelta(newVal) {
+      const clamped = Math.max(-modeRange, Math.min(modeRange, newVal));
+      const delta = clamped - vValues[modeIndex];
+      vValues[modeIndex] = clamped;
+
+      // Propagate delta into DOF sliders: p[useDof[j]] += delta * Vh[mode][j]
+      if (Vh && Math.abs(delta) > 1e-15) {
+        const rowOff = modeIndex * nActive;
+        for (let j = 0; j < nActive; j++) {
+          const dofIdx = currentUseDof[j];
+          p[dofIdx] += delta * Vh[rowOff + j];
+          // Update DOF slider display
+          const clamped2 = clampControlValue(dofIdx, p[dofIdx]);
+          p[dofIdx] = clamped2;
+          if (sliderInputs[dofIdx]) sliderInputs[dofIdx].value = String(clamped2);
+          if (parameterInputs[dofIdx]) parameterInputs[dofIdx].value = formatControlValue(clamped2);
+        }
+      }
+
+      // Sync vmode slider/input displays
+      if (vmodeSliderInputs[modeIndex]) vmodeSliderInputs[modeIndex].value = String(clamped);
+      if (vmodeParamInputs[modeIndex]) vmodeParamInputs[modeIndex].value = formatControlValue(clamped);
+
+      requestUpdate();
+    }
+
+    slider.addEventListener('input', () => {
+      applyVmodeDelta(Number(slider.value));
+    });
+
+    function commitVmodeInput() {
+      const raw = numInput.value.trim();
+      if (raw === '') {
+        numInput.value = formatControlValue(vValues[modeIndex]);
+        return;
+      }
+      const parsed = Number(raw);
+      if (!Number.isFinite(parsed)) {
+        numInput.value = formatControlValue(vValues[modeIndex]);
+        return;
+      }
+      applyVmodeDelta(parsed);
+    }
+
+    numInput.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') { event.preventDefault(); commitVmodeInput(); return; }
+      if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+        requestAnimationFrame(() => commitVmodeInput());
+      }
+    });
+    numInput.addEventListener('change', commitVmodeInput);
+    numInput.addEventListener('blur', commitVmodeInput);
+
+    row.appendChild(label);
+    row.appendChild(slider);
+    row.appendChild(numInput);
+    root.appendChild(row);
+    vmodeSliderInputs.push(slider);
+    vmodeParamInputs.push(numInput);
+  }
 }
 
 async function start() {
@@ -926,8 +1282,25 @@ async function start() {
   const model = await loadPackedModel('./model_meta.json', './model.f32');
 
   initModel(model.x, model.y, model.sx, model.sy, model.zk0, model.dzk, model.k);
+
+  // Initialize vmode data
+  if (model.norm) norm = model.norm;
+  if (model.wfSens) { wfSens = model.wfSens; wfSensRows = model.wfSensRows; }
+
+  // Set defaults in UI inputs
+  const useDofInput = document.getElementById('use-dof-input');
+  const nkeepInput = document.getElementById('nkeep-input');
+  if (useDofInput && model.defaultUseDof.length > 0) {
+    // Convert to compact range string
+    useDofInput.value = formatUseDof(model.defaultUseDof);
+  }
+  if (nkeepInput && model.defaultNkeep > 0) {
+    nkeepInput.value = String(model.defaultNkeep);
+  }
+
   buildSliders();
   buildZernikeOutputs();
+  recomputeVmodes();
   resizeDeck();
   updatePositions();
   updateZernikeOutputs();
@@ -990,6 +1363,21 @@ if (resetControlsBtn) {
   resetControlsBtn.addEventListener('click', resetControls);
 }
 
+// Apply vmodes button
+const applyVmodesBtn = document.getElementById('apply-vmodes');
+if (applyVmodesBtn) {
+  applyVmodesBtn.addEventListener('click', recomputeVmodes);
+}
+// Also allow Enter in the use_dof and nkeep inputs
+const useDofInputEl = document.getElementById('use-dof-input');
+const nkeepInputEl = document.getElementById('nkeep-input');
+if (useDofInputEl) {
+  useDofInputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); recomputeVmodes(); } });
+}
+if (nkeepInputEl) {
+  nkeepInputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); recomputeVmodes(); } });
+}
+
 vis.addEventListener('mousemove', updateMouseCoords);
 vis.addEventListener('mouseleave', clearMouseCoords);
 vis.addEventListener('wheel', (event) => {
@@ -1043,7 +1431,7 @@ if (zoomResetBtn) {
 window.addEventListener('keydown', (event) => {
   if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
   const tag = event.target && event.target.tagName;
-  if (tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'INPUT') return;
   if (event.key === 'r' || event.key === 'R') {
     event.preventDefault();
     resetControls();

@@ -1,11 +1,29 @@
 # Generate initial points and sensitivity
 
+import os
+from pathlib import Path
+
 import numpy as np
 import batoid
 from batoid_rubin import LSSTBuilder
 import json
+import yaml
 from star_sharp import StarSharp, PUPIL_OUTER, PUPIL_INNER
 from tqdm import tqdm
+
+# Load normalization weights and sensitivity matrix from ts_config_mttcs
+mttcs_dir = Path(os.environ["TS_CONFIG_MTTCS_DIR"])
+mtaos_dir = mttcs_dir / "MTAOS/v13/ofc/"
+
+senspath = mtaos_dir / "sensitivity_matrix" / "lsst_sensitivity_dz_31_29_50.yaml"
+with open(senspath, "r") as f:
+    wf_sens = np.array(yaml.safe_load(f), dtype=np.float32)
+# wf_sens shape: (31, 29, 50) -> flatten field*zk dimensions -> (31*29, 50)
+wf_sens = wf_sens.reshape(-1, wf_sens.shape[-1])
+
+normpath = mtaos_dir / "normalization_weights" / "range-fwhm.yaml"
+with open(normpath, "r") as f:
+    norm = np.array(yaml.safe_load(f), dtype=np.float64)
 
 ssh = StarSharp(
     "i",
@@ -208,23 +226,26 @@ sx_flat = Sx.ravel(order="C")
 sy_flat = Sy.ravel(order="C")
 zk0_flat = zk0.ravel(order="C")
 dzk_flat = dzk.ravel(order="C")
+wf_sens_flat = wf_sens.astype(np.float32).ravel(order="C")
 
 init_offset = 0
 sx_offset = init_offset + init.size
 sy_offset = sx_offset + sx_flat.size
 zk0_offset = sy_offset + sy_flat.size
 dzk_offset = zk0_offset + zk0_flat.size
+sens_offset = dzk_offset + dzk_flat.size
 
-packed = np.concatenate([init, sx_flat, sy_flat, zk0_flat, dzk_flat])
+packed = np.concatenate([init, sx_flat, sy_flat, zk0_flat, dzk_flat, wf_sens_flat])
 packed.tofile("model.f32")
 
+WF_SENS_ROWS, WF_SENS_COLS = wf_sens.shape
+
 meta = {
-    "version": 2,
+    "version": 3,
     "dtype": "float32",
     "N": int(N),
     "K": int(K),
-    "dof_ranges": ssh._ranges.tolist(),
-    "dof_power": ssh._moments_power.tolist(),
+    "norm": norm.tolist(),
     "default_use_dof": [int(v) for v in ssh.use_dof.tolist()],
     "default_nkeep": int(ssh.nkeep),
     "layout": {
@@ -232,7 +253,8 @@ meta = {
         "Sx": {"offset_f32": int(sx_offset), "length_f32": int(sx_flat.size), "shape": [int(K), int(N)], "order": "C"},
         "Sy": {"offset_f32": int(sy_offset), "length_f32": int(sy_flat.size), "shape": [int(K), int(N)], "order": "C"},
         "zk0": {"offset_f32": int(zk0_offset), "length_f32": int(zk0_flat.size), "shape": [int(ZK_CORNERS), int(ZK_TERMS)], "order": "C"},
-        "dzk": {"offset_f32": int(dzk_offset), "length_f32": int(dzk_flat.size), "shape": [int(ZK_CORNERS), int(ZK_TERMS), int(K)], "order": "C"}
+        "dzk": {"offset_f32": int(dzk_offset), "length_f32": int(dzk_flat.size), "shape": [int(ZK_CORNERS), int(ZK_TERMS), int(K)], "order": "C"},
+        "wf_sens": {"offset_f32": int(sens_offset), "length_f32": int(wf_sens_flat.size), "shape": [int(WF_SENS_ROWS), int(WF_SENS_COLS)], "order": "C"}
     }
 }
 with open("model_meta.json", "w") as f:

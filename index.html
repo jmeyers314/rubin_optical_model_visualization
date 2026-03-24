@@ -239,6 +239,8 @@
     .is-hidden {
       display: none;
     }
+    #vmode-sliders .row { margin: 2px 0; }
+    #vmode-sliders .row label { color: #6a4fc8; font-weight: 600; }
   </style>
 </head>
 <body>
@@ -251,6 +253,20 @@
       <input id="include-intrinsics" type="checkbox" checked />
       <span>Include intrinsics?</span>
     </label>
+    <div style="margin-bottom:10px;">
+      <div class="control-title">Vmode Settings</div>
+      <div class="row" style="grid-template-columns: 70px 1fr 60px;">
+        <label>use_dof</label>
+        <input id="use-dof-input" type="text" value="0-9,10-16,30-34" style="font-size:11px; font-family:ui-monospace,Menlo,monospace; padding:2px 4px; box-sizing:border-box; width:100%;" />
+        <span></span>
+      </div>
+      <div class="row" style="grid-template-columns: 70px 1fr 60px;">
+        <label>nkeep</label>
+        <input id="nkeep-input" type="number" min="1" max="50" value="12" style="font-size:11px; font-family:ui-monospace,Menlo,monospace; padding:2px 4px; width:60px;" />
+        <button id="apply-vmodes" class="btn" type="button" style="font-size:11px; padding:2px 8px;">Apply</button>
+      </div>
+      <div id="vmode-sliders"></div>
+    </div>
     <div class="slider-columns">
       <div class="control-column">
         <div class="control-title">Controls</div>
