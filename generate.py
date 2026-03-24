@@ -25,6 +25,10 @@ normpath = mtaos_dir / "normalization_weights" / "range-fwhm.yaml"
 with open(normpath, "r") as f:
     norm = np.array(yaml.safe_load(f), dtype=np.float64)
 
+# Adjust units from ts_config_mttcs (deg) to our model (arcsec)
+wf_sens[..., [3,4,8,9]] /= 3600
+norm[[3,4,8,9]] *= 3600
+
 ssh = StarSharp(
     "i",
     transverse_pupil_radii = 12,
