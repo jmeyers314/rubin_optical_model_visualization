@@ -54,6 +54,7 @@ let wfSensRows = 0;       // number of observation rows in wfSens
 let currentUseDof = [];   // Int array of active DOF indices
 let currentNkeep = 12;
 let Vh = null;            // Float64Array — (nkeep × nActive) mixing matrix
+let fullMixMatrix = null; // Float64Array — (nActive × nActive) full eigenvector matrix
 let nActive = 0;          // len(currentUseDof)
 let vValues = [];         // current vmode slider values
 let vmodeSliderInputs = [];
@@ -251,14 +252,16 @@ function computeVh(sens, sensRows, sensK, normArr, useDof, nkeep) {
   // Vh = top nkeep eigenvectors as rows, denormalized
   // vectors is column-major: vectors[row * nAct + col] where col = eigenvector index
   const nk = Math.min(nkeep, nAct);
-  const result = new Float64Array(nk * nAct);
-  for (let mode = 0; mode < nk; mode++) {
+  const vh = new Float64Array(nk * nAct);
+  const fullMatrix = new Float64Array(nAct * nAct);
+  for (let mode = 0; mode < nAct; mode++) {
     for (let j = 0; j < nAct; j++) {
-      // eigenvector `mode` component `j` is vectors[j * nAct + mode]
-      result[mode * nAct + j] = vectors[j * nAct + mode] * normArr[useDof[j]];
+      const val = vectors[j * nAct + mode] * normArr[useDof[j]];
+      fullMatrix[mode * nAct + j] = val;
+      if (mode < nk) vh[mode * nAct + j] = val;
     }
   }
-  return result;
+  return {vh, fullMatrix};
 }
 
 async function loadPackedModel(metaUrl, modelUrl) {
@@ -1114,14 +1117,18 @@ function recomputeVmodes() {
   nkeepInput.value = String(currentNkeep);
 
   if (norm && wfSens && nActive > 0) {
-    Vh = computeVh(wfSens, wfSensRows, K, norm, currentUseDof, currentNkeep);
+    const result = computeVh(wfSens, wfSensRows, K, norm, currentUseDof, currentNkeep);
+    Vh = result.vh;
+    fullMixMatrix = result.fullMatrix;
   } else {
     Vh = null;
+    fullMixMatrix = null;
   }
 
   // Reset vmode values and rebuild sliders
   vValues = new Array(currentNkeep).fill(0);
   buildVmodeSliders();
+  drawMixingMatrix();
 }
 
 function buildVmodeSliders() {
@@ -1262,6 +1269,142 @@ function buildVmodeSliders() {
     root.appendChild(row);
     vmodeSliderInputs.push(slider);
     vmodeParamInputs.push(numInput);
+  }
+}
+
+function bwrColor(t) {
+  t = Math.max(-1, Math.min(1, t));
+  let r, g, b;
+  if (t < 0) {
+    const s = 1 + t;
+    r = Math.round(255 * s);
+    g = Math.round(255 * s);
+    b = 255;
+  } else {
+    const s = 1 - t;
+    r = 255;
+    g = Math.round(255 * s);
+    b = Math.round(255 * s);
+  }
+  return `rgb(${r},${g},${b})`;
+}
+
+function computeGroupBoundaries(useDof) {
+  const m2Hex = [], camHex = [], m1m3Bend = [], m2Bend = [];
+  for (let i = 0; i < useDof.length; i++) {
+    const d = useDof[i];
+    if (d < 5) m2Hex.push(i);
+    else if (d < 10) camHex.push(i);
+    else if (d < 30) m1m3Bend.push(i);
+    else m2Bend.push(i);
+  }
+  const boundaries = [];
+  if (m2Hex.length > 0 && (camHex.length + m1m3Bend.length + m2Bend.length) > 0)
+    boundaries.push(m2Hex[m2Hex.length - 1]);
+  if (camHex.length > 0 && (m1m3Bend.length + m2Bend.length) > 0)
+    boundaries.push(camHex[camHex.length - 1]);
+  if (m1m3Bend.length > 0 && m2Bend.length > 0)
+    boundaries.push(m1m3Bend[m1m3Bend.length - 1]);
+  return boundaries;
+}
+
+function drawMixingMatrix() {
+  const canvas = document.getElementById('mixing-matrix-canvas');
+  if (!canvas) return;
+
+  if (!fullMixMatrix || nActive <= 0) {
+    canvas.width = 0;
+    canvas.height = 0;
+    canvas.style.width = '0';
+    canvas.style.height = '0';
+    return;
+  }
+
+  const CELL = 14;
+  const LABEL_W = 75;
+  const BOTTOM_H = 19;
+  const TOP_PAD = 2;
+  const nModes = nActive;
+  const nDofs = nActive;
+
+  const canvasW = LABEL_W + nModes * CELL;
+  const canvasH = TOP_PAD + nDofs * CELL + BOTTOM_H;
+
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.ceil(canvasW * dpr);
+  canvas.height = Math.ceil(canvasH * dpr);
+  canvas.style.width = canvasW + 'px';
+  canvas.style.height = canvasH + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, canvasW, canvasH);
+
+  // Normalize: mix @ diag(1/norm[use_dof])
+  const normMix = new Float64Array(fullMixMatrix.length);
+  for (let mode = 0; mode < nModes; mode++) {
+    for (let j = 0; j < nDofs; j++) {
+      const dofIdx = currentUseDof[j];
+      const n = (norm && norm[dofIdx]) ? norm[dofIdx] : 1;
+      normMix[mode * nActive + j] = fullMixMatrix[mode * nActive + j] / n;
+    }
+  }
+
+  let vmax = 0;
+  for (let i = 0; i < normMix.length; i++) {
+    vmax = Math.max(vmax, Math.abs(normMix[i]));
+  }
+  if (vmax < 1e-15) vmax = 1;
+
+  // Draw cells (origin="lower": DOF index 0 at bottom)
+  for (let mode = 0; mode < nModes; mode++) {
+    for (let j = 0; j < nDofs; j++) {
+      const val = normMix[mode * nActive + j];
+      ctx.fillStyle = bwrColor(val / vmax);
+      ctx.fillRect(LABEL_W + mode * CELL, TOP_PAD + (nDofs - 1 - j) * CELL, CELL, CELL);
+    }
+  }
+
+  // Red overlay for modes beyond nkeep
+  if (currentNkeep < nModes) {
+    ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
+    ctx.fillRect(
+      LABEL_W + currentNkeep * CELL, TOP_PAD,
+      (nModes - currentNkeep) * CELL, nDofs * CELL
+    );
+  }
+
+  // Group separator lines
+  const bounds = computeGroupBoundaries(currentUseDof);
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)';
+  ctx.lineWidth = 1;
+  for (const bIdx of bounds) {
+    const y = TOP_PAD + (nDofs - 1 - bIdx) * CELL;
+    ctx.beginPath();
+    ctx.moveTo(LABEL_W, y);
+    ctx.lineTo(LABEL_W + nModes * CELL, y);
+    ctx.stroke();
+  }
+
+  // Y-axis labels (DOF names)
+  ctx.fillStyle = '#333';
+  ctx.font = '8px ui-monospace, Menlo, monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let j = 0; j < nDofs; j++) {
+    const dofIdx = currentUseDof[j];
+    const full = CONTROL_NAMES[dofIdx] || ('DOF ' + dofIdx);
+    const name = full.replace(/\s*\[.*\]$/, '');
+    ctx.fillText(name, LABEL_W - 3, TOP_PAD + (nDofs - 1 - j) * CELL + CELL / 2);
+  }
+
+  // X-axis labels (mode numbers)
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const xStep = nModes > 30 ? 5 : (nModes > 15 ? 2 : 1);
+  for (let m = 0; m < nModes; m++) {
+    if (m % xStep !== 0 && m !== nModes - 1) continue;
+    ctx.fillText(String(m + 1), LABEL_W + m * CELL + CELL / 2, TOP_PAD + nDofs * CELL + 2);
   }
 }
 
