@@ -100,8 +100,9 @@
       text-align: left;
       white-space: pre;
     }
-    .btn { border: 1px solid #bbb; background: #f7f7f7; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; }
+    .btn { border: 1px solid #bbb; background: #f7f7f7; border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer; transition: all 80ms ease-out; }
     .btn:disabled { opacity: 0.55; cursor: not-allowed; }
+    .btn:active:not(:disabled) { transform: scale(0.96); box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.2); background: #efefef; }
     .axis-labels {
       position: absolute;
       left: 10px;

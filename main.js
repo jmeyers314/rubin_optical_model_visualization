@@ -1248,6 +1248,7 @@ function buildVmodeSliders() {
 
     numInput.addEventListener('keydown', (event) => {
       if (event.key === 'Enter') { event.preventDefault(); commitVmodeInput(); return; }
+      if (event.key === 'Escape') { event.preventDefault(); numInput.blur(); return; }
       if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
         requestAnimationFrame(() => commitVmodeInput());
       }
@@ -1372,10 +1373,16 @@ if (applyVmodesBtn) {
 const useDofInputEl = document.getElementById('use-dof-input');
 const nkeepInputEl = document.getElementById('nkeep-input');
 if (useDofInputEl) {
-  useDofInputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); recomputeVmodes(); } });
+  useDofInputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); recomputeVmodes(); }
+    if (e.key === 'Escape') { e.preventDefault(); useDofInputEl.blur(); }
+  });
 }
 if (nkeepInputEl) {
-  nkeepInputEl.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); recomputeVmodes(); } });
+  nkeepInputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); recomputeVmodes(); }
+    if (e.key === 'Escape') { e.preventDefault(); nkeepInputEl.blur(); }
+  });
 }
 
 vis.addEventListener('mousemove', updateMouseCoords);
