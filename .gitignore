@@ -3,3 +3,4 @@ model_meta.json
 *.asdf
 __pycache__
 .env
+.ipynb_checkpoints
