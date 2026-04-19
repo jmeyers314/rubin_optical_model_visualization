@@ -247,6 +247,9 @@
     <div style="font-weight:600; margin-bottom:6px;">Rubin Observatory Optical Sensitivity Model</div>
     <div class="controls">
       <button id="reset-controls" class="btn" type="button" disabled>Loading…</button>
+      <label style="font-size:12px; margin-left:10px;">
+        <input id="include-intrinsics" type="checkbox" checked> Include intrinsics
+      </label>
     </div>
     <div class="slider-columns">
       <div class="control-column">
@@ -271,6 +274,7 @@
     </div>
     <div class="axis-labels" aria-hidden="true">y ↑<br>x →</div>
     <div id="mouse-coords" class="mouse-coords" aria-hidden="true">x: ---, y: ---</div>
+    <div id="zernike-overlay" class="zernike-overlay" aria-hidden="true"></div>
     <div class="zoom-controls" aria-label="Zoom controls">
       <button id="zoom-in" class="zoom-btn" type="button" title="Zoom in">+</button>
       <button id="zoom-out" class="zoom-btn" type="button" title="Zoom out">−</button>

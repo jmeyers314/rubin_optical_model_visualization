@@ -389,6 +389,20 @@ async function loadPackedModel(metaUrl, modelUrl) {
     }
   }
 
+  const zk0Spec = layout ? layout.zk0 : undefined;
+  const dzkSpec = layout ? layout.dzk : undefined;
+  const hasZernikes = !!(zk0Spec && dzkSpec);
+  let zk0Offset = 0, zk0Length = 0, dzkOffset = 0, dzkLength = 0;
+  let zkCorners = 0, zkTerms = 0;
+  if (hasZernikes) {
+    zk0Offset = Number(zk0Spec.offset_f32);
+    zk0Length = Number(zk0Spec.length_f32);
+    dzkOffset = Number(dzkSpec.offset_f32);
+    dzkLength = Number(dzkSpec.length_f32);
+    zkCorners = zk0Spec.shape ? Number(zk0Spec.shape[0]) : DONUT_CORNERS;
+    zkTerms = zk0Spec.shape ? Number(zk0Spec.shape[1]) : DONUT_ZERNIKE_TERMS;
+  }
+
   const totalExpected = Math.max(
     spotOffset + spotLength,
     sxOffset + sxLength,
@@ -397,7 +411,9 @@ async function loadPackedModel(metaUrl, modelUrl) {
     hasDonuts ? donutSpotOffset + donutSpotLength : 0,
     hasDonuts ? donutSxOffset + donutSxLength : 0,
     hasDonuts ? donutSyOffset + donutSyLength : 0,
-    hasDonuts ? donutFieldOffset + donutFieldLength : 0
+    hasDonuts ? donutFieldOffset + donutFieldLength : 0,
+    hasZernikes ? zk0Offset + zk0Length : 0,
+    hasZernikes ? dzkOffset + dzkLength : 0
   );
   if (packed.length < totalExpected) {
     throw new Error(`Packed model too short: expected at least ${totalExpected} float32 values, got ${packed.length}`);
@@ -442,6 +458,13 @@ async function loadPackedModel(metaUrl, modelUrl) {
     loadedDonutSy = new Float32Array(packed.subarray(donutSyOffset, donutSyOffset + donutSyLength));
   }
 
+  let loadedZk0 = new Float32Array(0);
+  let loadedDzk = new Float32Array(0);
+  if (hasZernikes) {
+    loadedZk0 = new Float32Array(packed.subarray(zk0Offset, zk0Offset + zk0Length));
+    loadedDzk = new Float32Array(packed.subarray(dzkOffset, dzkOffset + dzkLength));
+  }
+
   return {
     x,
     y,
@@ -461,6 +484,10 @@ async function loadPackedModel(metaUrl, modelUrl) {
     donutNray: Number(meta.donut_nray || 0),
     donutClockAngleDeg: Number(meta.donut_clock_angle_deg || 10),
     donutClockRadiusScale: Number(meta.donut_clock_radius_scale || 1.4),
+    zk0: loadedZk0,
+    dzk: loadedDzk,
+    zkCorners,
+    zkTerms,
     k,
   };
 }
@@ -590,7 +617,14 @@ function initModel(model) {
   if (donutN > 0) {
     donutSx.set(model.donutSx);
     donutSy.set(model.donutSy);
+  }
 
+  if (model.zk0 && model.zk0.length > 0) {
+    zk0 = model.zk0;
+    dZk = model.dzk;
+  }
+
+  if (donutN > 0) {
     const nfieldIntra = Number(model.donutNfieldIntra || 0);
     const nray = Number(model.donutNray || 0);
     const intraPointCount = nfieldIntra * nray;
@@ -601,6 +635,8 @@ function initModel(model) {
       donutCenterY[i] = center.y;
     }
   }
+
+  buildZernikeOutputs();
 
   let maxR2 = 0;
   for (let i = 0; i < scienceN; i++) {
@@ -755,7 +791,7 @@ function evaluateCornerZernike(cornerIndex, termIndex) {
   const base = includeIntrinsics ? zk0[cornerIndex * DONUT_ZERNIKE_TERMS + termIndex] : 0;
   let delta = 0;
   for (let k = 0; k < K; k++) {
-    delta += dZk[zernikeIndex(cornerIndex, termIndex, k)] * p[k];
+    delta += dZk[zernikeIndex(cornerIndex, termIndex, k)] * dofValueToModelUnits(k, p[k]);
   }
   return base + delta;
 }
@@ -1137,6 +1173,7 @@ function requestUpdate() {
     updatePositions();
     posVersion++;
     render();
+    updateZernikeOutputs();
   });
 }
 
@@ -1573,6 +1610,7 @@ async function start() {
   updatePositions();
   posVersion++;
   render();
+  updateZernikeOutputs();
   setControlsReady(true);
   loadTelemetry.startupEndIso = new Date().toISOString();
   loadTelemetry.startupDurationMs = Math.max(0, nowMs() - startupStart);
@@ -1620,6 +1658,14 @@ window.addEventListener('resize', () => { resizeDeck(); render(); });
 
 if (resetControlsBtn) {
   resetControlsBtn.addEventListener('click', resetControls);
+}
+
+if (includeIntrinsicsCheckbox) {
+  includeIntrinsicsCheckbox.checked = includeIntrinsics;
+  includeIntrinsicsCheckbox.addEventListener('change', () => {
+    includeIntrinsics = includeIntrinsicsCheckbox.checked;
+    updateZernikeOutputs();
+  });
 }
 
 // Apply vmodes button

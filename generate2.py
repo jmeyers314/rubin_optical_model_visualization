@@ -1,4 +1,5 @@
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import json
@@ -89,18 +90,25 @@ extra_donut_spots_sensitivity = model.spots_sensitivity(
     focus="extra",
 )
 
-# intra_donut_zernikes_sensitivity = model.zernikes_sensitivity(
-#     intra_donut_field,
-#     steps=sf.from_f(steps),
-#     include_chip_heights=False,
-#     tqdm=tqdm,
-# )
-# extra_donut_zernikes_sensitivity = model.zernikes_sensitivity(
-#     extra_donut_field,
-#     steps=sf.from_f(steps),
-#     include_chip_heights=False,
-#     tqdm=tqdm,
-# )
+corner_x = 0.5*(intra_donut_field.x + extra_donut_field.x)
+corner_y = 0.5*(intra_donut_field.y + extra_donut_field.y)
+corner_field = replace(intra_donut_field, x=corner_x, y=corner_y)
+corner_zernikes_sensitivity = model.zernikes_sensitivity(
+    corner_field,
+    steps=sf.from_f(steps),
+    include_chip_heights=False,
+    tqdm=tqdm,
+)
+
+# Zernike nominal (intrinsic) and gradient: shape (nfield, jmax+1) and (K, nfield, jmax+1)
+# Store in nm; JS index: (cornerIndex * nterms + termIndex) * K + dofIndex
+zk0_arr = corner_zernikes_sensitivity.nominal.coefs.to_value("nm")  # (nfield, jmax+1)
+dzk_arr = corner_zernikes_sensitivity.gradient.coefs.to_value("nm")  # (K, nfield, jmax+1)
+ZK_CORNERS, ZK_TERMS = zk0_arr.shape  # (4, 29)
+# Reshape dzk to (nfield, jmax+1, K) for JS index ordering, then ravel
+dzk_arr_reordered = np.transpose(dzk_arr, (1, 2, 0))  # (nfield, jmax+1, K)
+zk0_flat = zk0_arr.ravel(order="C").astype(np.float32)
+dzk_flat = dzk_arr_reordered.ravel(order="C").astype(np.float32)
 
 x0 = science_spots_sensitivity.nominal.dx.to_value("micron")
 y0 = science_spots_sensitivity.nominal.dy.to_value("micron")
@@ -203,6 +211,9 @@ donut_sx_offset = donut_spot_offset + donut_spot_xy.size
 donut_sy_offset = donut_sx_offset + donut_sx_flat.size
 donut_field_offset = donut_sy_offset + donut_sy_flat.size
 
+zk0_offset = donut_field_offset + donut_field_xy.size
+dzk_offset = zk0_offset + zk0_flat.size
+
 packed = np.concatenate([
     spot_xy,
     sx_flat,
@@ -212,11 +223,13 @@ packed = np.concatenate([
     donut_sx_flat,
     donut_sy_flat,
     donut_field_xy,
+    zk0_flat,
+    dzk_flat,
 ])
 packed.tofile("model.f32")
 
 meta = {
-    "version": 5,
+    "version": 6,
     "dtype": "float32",
     "N": int(N),
     "K": int(K_dof),
@@ -270,6 +283,20 @@ meta = {
             "offset_f32": int(donut_field_offset),
             "length_f32": int(donut_field_xy.size),
             "encoding": "xy_interleaved",
+        },
+        "zk0": {
+            "offset_f32": int(zk0_offset),
+            "length_f32": int(zk0_flat.size),
+            "shape": [int(ZK_CORNERS), int(ZK_TERMS)],
+            "order": "C",
+            "units": "nm",
+        },
+        "dzk": {
+            "offset_f32": int(dzk_offset),
+            "length_f32": int(dzk_flat.size),
+            "shape": [int(ZK_CORNERS), int(ZK_TERMS), int(K_dof)],
+            "order": "C",
+            "units": "nm_per_dof_unit",
         },
     },
 }
