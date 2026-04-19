@@ -104,6 +104,9 @@ extra_donut_spots_sensitivity = model.spots_sensitivity(
 
 x0 = science_spots_sensitivity.nominal.dx.to_value("micron")
 y0 = science_spots_sensitivity.nominal.dy.to_value("micron")
+science_vignetted = science_spots_sensitivity.nominal.vignetted
+x0[science_vignetted] = np.nan
+y0[science_vignetted] = np.nan
 dx = science_spots_sensitivity.gradient.dx.to_value("micron")
 dy = science_spots_sensitivity.gradient.dy.to_value("micron")
 
@@ -127,11 +130,17 @@ field_y_flat = np.repeat(field_thy, nray).astype(np.float32)
 
 donut_intra_x0 = intra_donut_spots_sensitivity.nominal.dx.to_value("micron")
 donut_intra_y0 = intra_donut_spots_sensitivity.nominal.dy.to_value("micron")
+donut_intra_vignetted = intra_donut_spots_sensitivity.nominal.vignetted
+donut_intra_x0[donut_intra_vignetted] = np.nan
+donut_intra_y0[donut_intra_vignetted] = np.nan
 donut_intra_dx = intra_donut_spots_sensitivity.gradient.dx.to_value("micron")
 donut_intra_dy = intra_donut_spots_sensitivity.gradient.dy.to_value("micron")
 
 donut_extra_x0 = extra_donut_spots_sensitivity.nominal.dx.to_value("micron")
 donut_extra_y0 = extra_donut_spots_sensitivity.nominal.dy.to_value("micron")
+donut_extra_vignetted = extra_donut_spots_sensitivity.nominal.vignetted
+donut_extra_x0[donut_extra_vignetted] = np.nan
+donut_extra_y0[donut_extra_vignetted] = np.nan
 donut_extra_dx = extra_donut_spots_sensitivity.gradient.dx.to_value("micron")
 donut_extra_dy = extra_donut_spots_sensitivity.gradient.dy.to_value("micron")
 
