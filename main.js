@@ -38,9 +38,14 @@ const DONUT_CORNERS = 4;
 const DONUT_ZERNIKE_TERMS = 29;
 const WHEEL_ZOOM_SENSITIVITY = 0.0008;
 const WHEEL_ZOOM_MAX_STEP = 0.12;
+const SPOT_SCALE = 3e-3;
+const ARCSEC_PER_DEGREE = 3600;
+const ANGULAR_DOF_INDICES = new Set([3, 4, 8, 9]);
 
 let p = new Float32Array(K);
 let x0, y0, Sx, Sy;
+let fieldX, fieldY;
+let spotScale = SPOT_SCALE;
 let zk0 = new Float32Array(0);
 let dZk = new Float32Array(0);
 let modelRadius = WORLD_RADIUS;
@@ -109,6 +114,13 @@ function clampControlValue(index, value) {
 
 function formatControlValue(value) {
   return value.toFixed(VALUE_DECIMALS);
+}
+
+function dofValueToModelUnits(dofIndex, value) {
+  if (ANGULAR_DOF_INDICES.has(dofIndex)) {
+    return value / ARCSEC_PER_DEGREE;
+  }
+  return value;
 }
 
 // --- use_dof string parser (mirrors Python StateFactory) ---
@@ -288,102 +300,67 @@ async function loadPackedModel(metaUrl, modelUrl) {
   }
 
   const layout = meta && meta.layout ? meta.layout : null;
-  const initSpec = layout ? layout.init_xy : undefined;
+  const spotSpec = layout ? layout.spot_xy : undefined;
   const sxSpec = layout ? layout.Sx : undefined;
   const sySpec = layout ? layout.Sy : undefined;
-  const zk0Spec = layout ? layout.zk0 : undefined;
-  const dzkSpec = layout ? layout.dzk : undefined;
-  if (!initSpec || !sxSpec || !sySpec || !zk0Spec || !dzkSpec) {
-    throw new Error('Metadata layout must include init_xy, Sx, Sy, zk0, and dzk blocks');
+  const fieldSpec = layout ? layout.field_xy : undefined;
+  if (!spotSpec || !sxSpec || !sySpec || !fieldSpec) {
+    throw new Error('Metadata layout must include spot_xy, Sx, Sy, and field_xy blocks');
   }
 
-  const initOffset = Number(initSpec.offset_f32);
-  const initLength = Number(initSpec.length_f32);
+  const spotOffset = Number(spotSpec.offset_f32);
+  const spotLength = Number(spotSpec.length_f32);
   const sxOffset = Number(sxSpec.offset_f32);
   const sxLength = Number(sxSpec.length_f32);
   const syOffset = Number(sySpec.offset_f32);
   const syLength = Number(sySpec.length_f32);
-  const zk0Offset = Number(zk0Spec.offset_f32);
-  const zk0Length = Number(zk0Spec.length_f32);
-  const dzkOffset = Number(dzkSpec.offset_f32);
-  const dzkLength = Number(dzkSpec.length_f32);
+  const fieldOffset = Number(fieldSpec.offset_f32);
+  const fieldLength = Number(fieldSpec.length_f32);
 
   if (
-    ![initOffset, initLength, sxOffset, sxLength, syOffset, syLength, zk0Offset, zk0Length, dzkOffset, dzkLength].every(Number.isInteger)
+    ![spotOffset, spotLength, sxOffset, sxLength, syOffset, syLength, fieldOffset, fieldLength].every(Number.isInteger)
   ) {
     throw new Error('All metadata offsets/lengths must be integers');
   }
 
-  if (initLength !== 2 * n || sxLength !== k * n || syLength !== k * n) {
+  if (spotLength !== 2 * n || sxLength !== k * n || syLength !== k * n || fieldLength !== 2 * n) {
     throw new Error('Metadata block lengths do not match N/K');
   }
 
-  const expectedZk0Length = DONUT_CORNERS * DONUT_ZERNIKE_TERMS;
-  const expectedDzkLength = DONUT_CORNERS * DONUT_ZERNIKE_TERMS * k;
-  if (zk0Length !== expectedZk0Length || dzkLength !== expectedDzkLength) {
-    throw new Error(
-      `Metadata zk block lengths do not match expected shapes (zk0=${expectedZk0Length}, dzk=${expectedDzkLength})`
-    );
-  }
-
   const totalExpected = Math.max(
-    initOffset + initLength,
+    spotOffset + spotLength,
     sxOffset + sxLength,
     syOffset + syLength,
-    zk0Offset + zk0Length,
-    dzkOffset + dzkLength
+    fieldOffset + fieldLength
   );
   if (packed.length < totalExpected) {
     throw new Error(`Packed model too short: expected at least ${totalExpected} float32 values, got ${packed.length}`);
   }
 
-  const initFlat = packed.subarray(initOffset, initOffset + initLength);
+  const spotFlat = packed.subarray(spotOffset, spotOffset + spotLength);
+  const fieldFlat = packed.subarray(fieldOffset, fieldOffset + fieldLength);
   const x = new Float32Array(n);
   const y = new Float32Array(n);
+  const loadedFieldX = new Float32Array(n);
+  const loadedFieldY = new Float32Array(n);
   for (let i = 0; i < n; i++) {
-    x[i] = initFlat[2 * i];
-    y[i] = initFlat[2 * i + 1];
+    x[i] = spotFlat[2 * i];
+    y[i] = spotFlat[2 * i + 1];
+    loadedFieldX[i] = fieldFlat[2 * i];
+    loadedFieldY[i] = fieldFlat[2 * i + 1];
   }
 
   const loadedSx = new Float32Array(packed.subarray(sxOffset, sxOffset + sxLength));
   const loadedSy = new Float32Array(packed.subarray(syOffset, syOffset + syLength));
-  const loadedZk0 = new Float32Array(packed.subarray(zk0Offset, zk0Offset + zk0Length));
-  const loadedDzk = new Float32Array(packed.subarray(dzkOffset, dzkOffset + dzkLength));
-
-  // Load wavefront sensitivity matrix (for vmode computation)
-  let loadedWfSens = null;
-  let loadedWfSensRows = 0;
-  const wfSensSpec = layout ? layout.wf_sens : undefined;
-  if (wfSensSpec) {
-    const wsOffset = Number(wfSensSpec.offset_f32);
-    const wsLength = Number(wfSensSpec.length_f32);
-    loadedWfSens = new Float32Array(packed.subarray(wsOffset, wsOffset + wsLength));
-    loadedWfSensRows = wfSensSpec.shape ? wfSensSpec.shape[0] : 0;
-  }
-
-  // Load norm from meta (JSON array)
-  let loadedNorm = null;
-  if (Array.isArray(meta.norm)) {
-    loadedNorm = new Float64Array(meta.norm);
-  }
-
-  // Load defaults
-  const defaultUseDof = Array.isArray(meta.default_use_dof) ? meta.default_use_dof : [];
-  const defaultNkeep = Number.isInteger(meta.default_nkeep) ? meta.default_nkeep : 12;
 
   return {
     x,
     y,
+    fieldX: loadedFieldX,
+    fieldY: loadedFieldY,
     sx: loadedSx,
     sy: loadedSy,
-    zk0: loadedZk0,
-    dzk: loadedDzk,
     k,
-    wfSens: loadedWfSens,
-    wfSensRows: loadedWfSensRows,
-    norm: loadedNorm,
-    defaultUseDof,
-    defaultNkeep
   };
 }
 
@@ -446,7 +423,7 @@ async function fetchArrayBufferWithProgress(url, onProgress) {
   return merged.buffer;
 }
 
-function initModel(initialX, initialY, initialSx, initialSy, initialZk0, initialDzk, loadedK) {
+function initModel(initialX, initialY, initialFieldX, initialFieldY, initialSx, initialSy, loadedK) {
   N = initialX.length;
   if (Number.isInteger(loadedK) && loadedK > 0) {
     K = loadedK;
@@ -454,47 +431,51 @@ function initModel(initialX, initialY, initialSx, initialSy, initialZk0, initial
   p = new Float32Array(K);
   x0 = initialX;
   y0 = initialY;
+  fieldX = initialFieldX;
+  fieldY = initialFieldY;
+  spotScale = SPOT_SCALE;
   positions = new Float32Array(N * 2);
   data = Array.from({length: N}, (_, i) => i);
   Sx = new Float32Array(K * N);
   Sy = new Float32Array(K * N);
-  zk0 = new Float32Array(DONUT_CORNERS * DONUT_ZERNIKE_TERMS);
-  dZk = new Float32Array(DONUT_CORNERS * DONUT_ZERNIKE_TERMS * K);
 
-  const R = estimateRadius(x0, y0);
-  modelRadius = R;
+  if (!fieldX || !fieldY || fieldX.length !== N || fieldY.length !== N) {
+    throw new Error('Missing or invalid field_xy arrays in loaded model');
+  }
 
-  if (!initialSx || !initialSy || !initialZk0 || !initialDzk) {
-    throw new Error('Missing Sx/Sy/zk0/dzk arrays in loaded model');
+  if (!initialSx || !initialSy) {
+    throw new Error('Missing Sx/Sy arrays in loaded model');
   }
 
   if (initialSx.length !== K * N || initialSy.length !== K * N) {
     throw new Error('Loaded sensitivity sizes do not match K*N');
   }
-  if (initialZk0.length !== DONUT_CORNERS * DONUT_ZERNIKE_TERMS) {
-    throw new Error('Loaded zk0 size does not match expected donut/corner dimensions');
+
+  let maxR2 = 0;
+  for (let i = 0; i < N; i++) {
+    const xx = fieldX[i] + x0[i] * spotScale;
+    const yy = fieldY[i] + y0[i] * spotScale;
+    const r2 = xx * xx + yy * yy;
+    if (r2 > maxR2) maxR2 = r2;
   }
-  if (initialDzk.length !== DONUT_CORNERS * DONUT_ZERNIKE_TERMS * K) {
-    throw new Error('Loaded dzk size does not match expected donut/corner/K dimensions');
-  }
+  modelRadius = Math.max(1e-6, Math.sqrt(maxR2));
+
   Sx.set(initialSx);
   Sy.set(initialSy);
-  zk0.set(initialZk0);
-  dZk.set(initialDzk);
 }
 
 function updatePositions() {
   for (let i = 0; i < N; i++) {
-    positions[2*i]   = x0[i];
-    positions[2*i+1] = y0[i];
+    positions[2*i] = fieldX[i] + x0[i] * spotScale;
+    positions[2*i+1] = fieldY[i] + y0[i] * spotScale;
   }
   for (let k = 0; k < K; k++) {
-    const pk = p[k];
+    const pk = dofValueToModelUnits(k, p[k]);
     if (pk === 0) continue;
     const off = k * N;
     for (let i = 0; i < N; i++) {
-      positions[2*i]   += Sx[off + i] * pk;
-      positions[2*i+1] += Sy[off + i] * pk;
+      positions[2*i] += Sx[off + i] * pk * spotScale;
+      positions[2*i+1] += Sy[off + i] * pk * spotScale;
     }
   }
 }
@@ -514,7 +495,7 @@ const copyDiagnosticsStatusEl = document.getElementById('copy-diagnostics-status
 const zoomInBtn = document.getElementById('zoom-in');
 const zoomOutBtn = document.getElementById('zoom-out');
 const zoomResetBtn = document.getElementById('zoom-reset');
-const SCALE_BAR_WORLD_UNITS = 0.24;
+const SCALE_BAR_WORLD_UNITS = 0.1;
 const GRID_PITCH_WORLD_UNITS = 0.048;
 const GRID_MAJOR_EVERY = 5;
 const GRID_MINOR_COLOR = 'rgba(122, 178, 255, 0.04)';
@@ -987,7 +968,6 @@ function requestUpdate() {
   requestAnimationFrame(() => {
     pending = false;
     updatePositions();
-    updateZernikeOutputs();
     posVersion++;
     render();
   });
@@ -1096,12 +1076,6 @@ function resetControls() {
     p[k] = 0;
     if (sliderInputs[k]) sliderInputs[k].value = '0';
     if (parameterInputs[k]) parameterInputs[k].value = formatControlValue(0);
-  }
-  // Reset vmode sliders
-  for (let i = 0; i < vValues.length; i++) {
-    vValues[i] = 0;
-    if (vmodeSliderInputs[i]) vmodeSliderInputs[i].value = '0';
-    if (vmodeParamInputs[i]) vmodeParamInputs[i].value = formatControlValue(0);
   }
   requestUpdate();
 }
@@ -1425,29 +1399,11 @@ async function start() {
   initializeDeck();
   const model = await loadPackedModel('./model_meta.json', './model.f32');
 
-  initModel(model.x, model.y, model.sx, model.sy, model.zk0, model.dzk, model.k);
-
-  // Initialize vmode data
-  if (model.norm) norm = model.norm;
-  if (model.wfSens) { wfSens = model.wfSens; wfSensRows = model.wfSensRows; }
-
-  // Set defaults in UI inputs
-  const useDofInput = document.getElementById('use-dof-input');
-  const nkeepInput = document.getElementById('nkeep-input');
-  if (useDofInput && model.defaultUseDof.length > 0) {
-    // Convert to compact range string
-    useDofInput.value = formatUseDof(model.defaultUseDof);
-  }
-  if (nkeepInput && model.defaultNkeep > 0) {
-    nkeepInput.value = String(model.defaultNkeep);
-  }
+  initModel(model.x, model.y, model.fieldX, model.fieldY, model.sx, model.sy, model.k);
 
   buildSliders();
-  buildZernikeOutputs();
-  recomputeVmodes();
   resizeDeck();
   updatePositions();
-  updateZernikeOutputs();
   posVersion++;
   render();
   setControlsReady(true);
@@ -1468,14 +1424,6 @@ start().catch((error) => {
   setControlsReady(false);
   showLoadingError(buildLoadErrorMessage(error));
 });
-
-if (includeIntrinsicsCheckbox) {
-  includeIntrinsics = !!includeIntrinsicsCheckbox.checked;
-  includeIntrinsicsCheckbox.addEventListener('change', () => {
-    includeIntrinsics = !!includeIntrinsicsCheckbox.checked;
-    updateZernikeOutputs();
-  });
-}
 
 if (copyDiagnosticsBtn) {
   copyDiagnosticsBtn.addEventListener('click', async () => {

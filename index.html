@@ -64,7 +64,7 @@
     .checkbox-row input[type="checkbox"] {
       margin: 0;
     }
-    .slider-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; min-height: 0; align-items: start; }
+    .slider-columns { display: grid; grid-template-columns: 1fr; gap: 16px; min-height: 0; align-items: start; }
     .control-column { min-width: 0; }
     .control-title { font-size: 12px; font-weight: 600; margin: 4px 0 8px; }
     .zernike-overlay {
@@ -240,9 +240,6 @@
     .is-hidden {
       display: none;
     }
-    #vmode-sliders .row { margin: 2px 0; grid-template-columns: 40px 1fr 86px; }
-    #vmode-sliders .row label { color: #6a4fc8; font-weight: 600; }
-    #mixing-matrix-canvas { display: block; }
   </style>
 </head>
 <body>
@@ -251,31 +248,10 @@
     <div class="controls">
       <button id="reset-controls" class="btn" type="button" disabled>Loading…</button>
     </div>
-    <label class="checkbox-row" for="include-intrinsics">
-      <input id="include-intrinsics" type="checkbox" checked />
-      <span>Include intrinsics?</span>
-    </label>
     <div class="slider-columns">
       <div class="control-column">
         <div class="control-title">DOF Controls</div>
         <div id="sliders"></div>
-      </div>
-      <div class="control-column">
-        <div class="control-title">Vmode Settings</div>
-        <div class="row" style="grid-template-columns: 70px 1fr 60px;">
-          <label>use_dof</label>
-          <input id="use-dof-input" type="text" value="0-9,10-16,30-34" style="font-size:11px; font-family:ui-monospace,Menlo,monospace; padding:2px 4px; box-sizing:border-box; width:100%;" />
-          <span></span>
-        </div>
-        <div class="row" style="grid-template-columns: 70px 1fr 60px;">
-          <label>nkeep</label>
-          <input id="nkeep-input" type="number" min="1" max="50" value="12" style="font-size:11px; font-family:ui-monospace,Menlo,monospace; padding:2px 4px; width:60px;" />
-          <button id="apply-vmodes" class="btn" type="button" style="font-size:11px; padding:2px 8px;">Apply</button>
-        </div>
-        <div id="vmode-sliders"></div>
-        <div id="mixing-matrix-wrap" style="overflow-x:auto; margin-top:10px;">
-          <canvas id="mixing-matrix-canvas"></canvas>
-        </div>
       </div>
     </div>
   </div>
@@ -300,10 +276,9 @@
       <button id="zoom-out" class="zoom-btn" type="button" title="Zoom out">−</button>
       <button id="zoom-reset" class="zoom-btn wide" type="button" title="Reset zoom">Reset</button>
     </div>
-    <div id="zernike-overlay" class="zernike-overlay" aria-hidden="true"></div>
     <div class="scale-bar" aria-hidden="true">
       <div id="scale-bar-line" class="scale-bar-line"></div>
-      <div>1 arcsec</div>
+      <div>0.1 deg</div>
     </div>
   </div>
 
