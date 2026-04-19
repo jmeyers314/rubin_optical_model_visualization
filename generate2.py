@@ -72,22 +72,22 @@ science_spots_sensitivity = model.spots_sensitivity(
     tqdm=tqdm,
 )
 
-# intra_donut_spots_sensitivity = model.spots_sensitivity(
-#     intra_donut_field,
-#     steps=sf.from_f(steps),
-#     nrad=20,
-#     include_chip_heights=False,
-#     tqdm=tqdm,
-#     focus="intra",
-# )
-# extra_donut_spots_sensitivity = model.spots_sensitivity(
-#     extra_donut_field,
-#     steps=sf.from_f(steps),
-#     nrad=20,
-#     include_chip_heights=False,
-#     tqdm=tqdm,
-#     focus="extra",
-# )
+intra_donut_spots_sensitivity = model.spots_sensitivity(
+    intra_donut_field,
+    steps=sf.from_f(steps),
+    nrad=20,
+    include_chip_heights=False,
+    tqdm=tqdm,
+    focus="intra",
+)
+extra_donut_spots_sensitivity = model.spots_sensitivity(
+    extra_donut_field,
+    steps=sf.from_f(steps),
+    nrad=20,
+    include_chip_heights=False,
+    tqdm=tqdm,
+    focus="extra",
+)
 
 # intra_donut_zernikes_sensitivity = model.zernikes_sensitivity(
 #     intra_donut_field,
@@ -125,6 +125,42 @@ Sy = dy.reshape(K_dof, N).astype(np.float32)
 field_x_flat = np.repeat(field_thx, nray).astype(np.float32)
 field_y_flat = np.repeat(field_thy, nray).astype(np.float32)
 
+donut_intra_x0 = intra_donut_spots_sensitivity.nominal.dx.to_value("micron")
+donut_intra_y0 = intra_donut_spots_sensitivity.nominal.dy.to_value("micron")
+donut_intra_dx = intra_donut_spots_sensitivity.gradient.dx.to_value("micron")
+donut_intra_dy = intra_donut_spots_sensitivity.gradient.dy.to_value("micron")
+
+donut_extra_x0 = extra_donut_spots_sensitivity.nominal.dx.to_value("micron")
+donut_extra_y0 = extra_donut_spots_sensitivity.nominal.dy.to_value("micron")
+donut_extra_dx = extra_donut_spots_sensitivity.gradient.dx.to_value("micron")
+donut_extra_dy = extra_donut_spots_sensitivity.gradient.dy.to_value("micron")
+
+donut_x0 = np.concatenate([donut_intra_x0, donut_extra_x0], axis=0)
+donut_y0 = np.concatenate([donut_intra_y0, donut_extra_y0], axis=0)
+donut_dx = np.concatenate([donut_intra_dx, donut_extra_dx], axis=1)
+donut_dy = np.concatenate([donut_intra_dy, donut_extra_dy], axis=1)
+
+donut_nfield, donut_nray = donut_x0.shape
+donut_N = donut_nfield * donut_nray
+
+intra_ocs = intra_donut_field.angle.ocs
+extra_ocs = extra_donut_field.angle.ocs
+donut_field_thx = np.concatenate([
+    intra_ocs.x.to_value("deg"),
+    extra_ocs.x.to_value("deg"),
+])
+donut_field_thy = np.concatenate([
+    intra_ocs.y.to_value("deg"),
+    extra_ocs.y.to_value("deg"),
+])
+
+donut_x0_flat = donut_x0.ravel().astype(np.float32)
+donut_y0_flat = donut_y0.ravel().astype(np.float32)
+donut_Sx = donut_dx.reshape(K_dof, donut_N).astype(np.float32)
+donut_Sy = donut_dy.reshape(K_dof, donut_N).astype(np.float32)
+donut_field_x_flat = np.repeat(donut_field_thx, donut_nray).astype(np.float32)
+donut_field_y_flat = np.repeat(donut_field_thy, donut_nray).astype(np.float32)
+
 # Pack binary: spot_xy (micron, interleaved), Sx, Sy, field_xy (deg, interleaved)
 spot_xy = np.empty(2 * N, dtype=np.float32)
 spot_xy[0::2] = x0_flat
@@ -137,19 +173,50 @@ field_xy[1::2] = field_y_flat
 sx_flat = Sx.ravel(order="C")
 sy_flat = Sy.ravel(order="C")
 
+donut_spot_xy = np.empty(2 * donut_N, dtype=np.float32)
+donut_spot_xy[0::2] = donut_x0_flat
+donut_spot_xy[1::2] = donut_y0_flat
+
+donut_field_xy = np.empty(2 * donut_N, dtype=np.float32)
+donut_field_xy[0::2] = donut_field_x_flat
+donut_field_xy[1::2] = donut_field_y_flat
+
+donut_sx_flat = donut_Sx.ravel(order="C")
+donut_sy_flat = donut_Sy.ravel(order="C")
+
 spot_offset = 0
 sx_offset = spot_offset + spot_xy.size
 sy_offset = sx_offset + sx_flat.size
 field_offset = sy_offset + sy_flat.size
 
-packed = np.concatenate([spot_xy, sx_flat, sy_flat, field_xy])
+donut_spot_offset = field_offset + field_xy.size
+donut_sx_offset = donut_spot_offset + donut_spot_xy.size
+donut_sy_offset = donut_sx_offset + donut_sx_flat.size
+donut_field_offset = donut_sy_offset + donut_sy_flat.size
+
+packed = np.concatenate([
+    spot_xy,
+    sx_flat,
+    sy_flat,
+    field_xy,
+    donut_spot_xy,
+    donut_sx_flat,
+    donut_sy_flat,
+    donut_field_xy,
+])
 packed.tofile("model.f32")
 
 meta = {
-    "version": 4,
+    "version": 5,
     "dtype": "float32",
     "N": int(N),
     "K": int(K_dof),
+    "donut_N": int(donut_N),
+    "donut_nfield_intra": int(donut_intra_x0.shape[0]),
+    "donut_nfield_extra": int(donut_extra_x0.shape[0]),
+    "donut_nray": int(donut_nray),
+    "donut_clock_angle_deg": 10.0,
+    "donut_clock_radius_scale": 1.4,
     "layout": {
         "spot_xy": {
             "offset_f32": int(spot_offset),
@@ -171,6 +238,28 @@ meta = {
         "field_xy": {
             "offset_f32": int(field_offset),
             "length_f32": int(field_xy.size),
+            "encoding": "xy_interleaved",
+        },
+        "donut_spot_xy": {
+            "offset_f32": int(donut_spot_offset),
+            "length_f32": int(donut_spot_xy.size),
+            "encoding": "xy_interleaved",
+        },
+        "donut_Sx": {
+            "offset_f32": int(donut_sx_offset),
+            "length_f32": int(donut_sx_flat.size),
+            "shape": [int(K_dof), int(donut_N)],
+            "order": "C",
+        },
+        "donut_Sy": {
+            "offset_f32": int(donut_sy_offset),
+            "length_f32": int(donut_sy_flat.size),
+            "shape": [int(K_dof), int(donut_N)],
+            "order": "C",
+        },
+        "donut_field_xy": {
+            "offset_f32": int(donut_field_offset),
+            "length_f32": int(donut_field_xy.size),
             "encoding": "xy_interleaved",
         },
     },

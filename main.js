@@ -39,13 +39,22 @@ const DONUT_ZERNIKE_TERMS = 29;
 const WHEEL_ZOOM_SENSITIVITY = 0.0008;
 const WHEEL_ZOOM_MAX_STEP = 0.12;
 const SPOT_SCALE = 3e-3;
+const DONUT_SPOT_SCALE = 5e-4;
 const ARCSEC_PER_DEGREE = 3600;
 const ANGULAR_DOF_INDICES = new Set([3, 4, 8, 9]);
 
 let p = new Float32Array(K);
-let x0, y0, Sx, Sy;
-let fieldX, fieldY;
+let scienceN = 0;
+let donutN = 0;
+let scienceX0, scienceY0, scienceSx, scienceSy;
+let scienceFieldX, scienceFieldY;
+let donutX0, donutY0, donutSx, donutSy;
+let donutFieldX, donutFieldY;
+let donutCenterX, donutCenterY;
 let spotScale = SPOT_SCALE;
+let donutSpotScale = DONUT_SPOT_SCALE;
+let donutClockAngleDeg = 10;
+let donutClockRadiusScale = 1.4;
 let zk0 = new Float32Array(0);
 let dZk = new Float32Array(0);
 let modelRadius = WORLD_RADIUS;
@@ -121,6 +130,16 @@ function dofValueToModelUnits(dofIndex, value) {
     return value / ARCSEC_PER_DEGREE;
   }
   return value;
+}
+
+function computeClockedCenter(x, y, isIntra) {
+  const theta = (isIntra ? donutClockAngleDeg : -donutClockAngleDeg) * Math.PI / 180;
+  const c = Math.cos(theta);
+  const s = Math.sin(theta);
+  return {
+    x: donutClockRadiusScale * (c * x - s * y),
+    y: donutClockRadiusScale * (s * x + c * y),
+  };
 }
 
 // --- use_dof string parser (mirrors Python StateFactory) ---
@@ -304,6 +323,10 @@ async function loadPackedModel(metaUrl, modelUrl) {
   const sxSpec = layout ? layout.Sx : undefined;
   const sySpec = layout ? layout.Sy : undefined;
   const fieldSpec = layout ? layout.field_xy : undefined;
+  const donutSpotSpec = layout ? layout.donut_spot_xy : undefined;
+  const donutSxSpec = layout ? layout.donut_Sx : undefined;
+  const donutSySpec = layout ? layout.donut_Sy : undefined;
+  const donutFieldSpec = layout ? layout.donut_field_xy : undefined;
   if (!spotSpec || !sxSpec || !sySpec || !fieldSpec) {
     throw new Error('Metadata layout must include spot_xy, Sx, Sy, and field_xy blocks');
   }
@@ -317,21 +340,64 @@ async function loadPackedModel(metaUrl, modelUrl) {
   const fieldOffset = Number(fieldSpec.offset_f32);
   const fieldLength = Number(fieldSpec.length_f32);
 
+  const donutCount = Number(meta.donut_N || 0);
+  const hasDonuts = donutCount > 0 && donutSpotSpec && donutSxSpec && donutSySpec && donutFieldSpec;
+
+  let donutSpotOffset = 0;
+  let donutSpotLength = 0;
+  let donutSxOffset = 0;
+  let donutSxLength = 0;
+  let donutSyOffset = 0;
+  let donutSyLength = 0;
+  let donutFieldOffset = 0;
+  let donutFieldLength = 0;
+  if (hasDonuts) {
+    donutSpotOffset = Number(donutSpotSpec.offset_f32);
+    donutSpotLength = Number(donutSpotSpec.length_f32);
+    donutSxOffset = Number(donutSxSpec.offset_f32);
+    donutSxLength = Number(donutSxSpec.length_f32);
+    donutSyOffset = Number(donutSySpec.offset_f32);
+    donutSyLength = Number(donutSySpec.length_f32);
+    donutFieldOffset = Number(donutFieldSpec.offset_f32);
+    donutFieldLength = Number(donutFieldSpec.length_f32);
+  }
+
   if (
     ![spotOffset, spotLength, sxOffset, sxLength, syOffset, syLength, fieldOffset, fieldLength].every(Number.isInteger)
   ) {
     throw new Error('All metadata offsets/lengths must be integers');
   }
+  if (hasDonuts && ![
+    donutSpotOffset,
+    donutSpotLength,
+    donutSxOffset,
+    donutSxLength,
+    donutSyOffset,
+    donutSyLength,
+    donutFieldOffset,
+    donutFieldLength,
+  ].every(Number.isInteger)) {
+    throw new Error('All donut metadata offsets/lengths must be integers');
+  }
 
   if (spotLength !== 2 * n || sxLength !== k * n || syLength !== k * n || fieldLength !== 2 * n) {
     throw new Error('Metadata block lengths do not match N/K');
+  }
+  if (hasDonuts) {
+    if (donutSpotLength !== 2 * donutCount || donutSxLength !== k * donutCount || donutSyLength !== k * donutCount || donutFieldLength !== 2 * donutCount) {
+      throw new Error('Donut metadata block lengths do not match donut_N/K');
+    }
   }
 
   const totalExpected = Math.max(
     spotOffset + spotLength,
     sxOffset + sxLength,
     syOffset + syLength,
-    fieldOffset + fieldLength
+    fieldOffset + fieldLength,
+    hasDonuts ? donutSpotOffset + donutSpotLength : 0,
+    hasDonuts ? donutSxOffset + donutSxLength : 0,
+    hasDonuts ? donutSyOffset + donutSyLength : 0,
+    hasDonuts ? donutFieldOffset + donutFieldLength : 0
   );
   if (packed.length < totalExpected) {
     throw new Error(`Packed model too short: expected at least ${totalExpected} float32 values, got ${packed.length}`);
@@ -353,6 +419,29 @@ async function loadPackedModel(metaUrl, modelUrl) {
   const loadedSx = new Float32Array(packed.subarray(sxOffset, sxOffset + sxLength));
   const loadedSy = new Float32Array(packed.subarray(syOffset, syOffset + syLength));
 
+  let loadedDonutX = new Float32Array(0);
+  let loadedDonutY = new Float32Array(0);
+  let loadedDonutFieldX = new Float32Array(0);
+  let loadedDonutFieldY = new Float32Array(0);
+  let loadedDonutSx = new Float32Array(0);
+  let loadedDonutSy = new Float32Array(0);
+  if (hasDonuts) {
+    const donutSpotFlat = packed.subarray(donutSpotOffset, donutSpotOffset + donutSpotLength);
+    const donutFieldFlat = packed.subarray(donutFieldOffset, donutFieldOffset + donutFieldLength);
+    loadedDonutX = new Float32Array(donutCount);
+    loadedDonutY = new Float32Array(donutCount);
+    loadedDonutFieldX = new Float32Array(donutCount);
+    loadedDonutFieldY = new Float32Array(donutCount);
+    for (let i = 0; i < donutCount; i++) {
+      loadedDonutX[i] = donutSpotFlat[2 * i];
+      loadedDonutY[i] = donutSpotFlat[2 * i + 1];
+      loadedDonutFieldX[i] = donutFieldFlat[2 * i];
+      loadedDonutFieldY[i] = donutFieldFlat[2 * i + 1];
+    }
+    loadedDonutSx = new Float32Array(packed.subarray(donutSxOffset, donutSxOffset + donutSxLength));
+    loadedDonutSy = new Float32Array(packed.subarray(donutSyOffset, donutSyOffset + donutSyLength));
+  }
+
   return {
     x,
     y,
@@ -360,6 +449,18 @@ async function loadPackedModel(metaUrl, modelUrl) {
     fieldY: loadedFieldY,
     sx: loadedSx,
     sy: loadedSy,
+    donutX: loadedDonutX,
+    donutY: loadedDonutY,
+    donutFieldX: loadedDonutFieldX,
+    donutFieldY: loadedDonutFieldY,
+    donutSx: loadedDonutSx,
+    donutSy: loadedDonutSy,
+    donutN: donutCount,
+    donutNfieldIntra: Number(meta.donut_nfield_intra || 0),
+    donutNfieldExtra: Number(meta.donut_nfield_extra || 0),
+    donutNray: Number(meta.donut_nray || 0),
+    donutClockAngleDeg: Number(meta.donut_clock_angle_deg || 10),
+    donutClockRadiusScale: Number(meta.donut_clock_radius_scale || 1.4),
     k,
   };
 }
@@ -423,23 +524,47 @@ async function fetchArrayBufferWithProgress(url, onProgress) {
   return merged.buffer;
 }
 
-function initModel(initialX, initialY, initialFieldX, initialFieldY, initialSx, initialSy, loadedK) {
-  N = initialX.length;
+function initModel(model) {
+  const initialX = model.x;
+  const initialY = model.y;
+  const initialFieldX = model.fieldX;
+  const initialFieldY = model.fieldY;
+  const initialSx = model.sx;
+  const initialSy = model.sy;
+  const loadedK = model.k;
+
+  scienceN = initialX.length;
+  donutN = model.donutN || 0;
+  N = scienceN + donutN;
   if (Number.isInteger(loadedK) && loadedK > 0) {
     K = loadedK;
   }
   p = new Float32Array(K);
-  x0 = initialX;
-  y0 = initialY;
-  fieldX = initialFieldX;
-  fieldY = initialFieldY;
+  scienceX0 = initialX;
+  scienceY0 = initialY;
+  scienceFieldX = initialFieldX;
+  scienceFieldY = initialFieldY;
+  scienceSx = new Float32Array(K * scienceN);
+  scienceSy = new Float32Array(K * scienceN);
+
+  donutX0 = model.donutX || new Float32Array(0);
+  donutY0 = model.donutY || new Float32Array(0);
+  donutFieldX = model.donutFieldX || new Float32Array(0);
+  donutFieldY = model.donutFieldY || new Float32Array(0);
+  donutSx = new Float32Array(K * donutN);
+  donutSy = new Float32Array(K * donutN);
+  donutCenterX = new Float32Array(donutN);
+  donutCenterY = new Float32Array(donutN);
+
   spotScale = SPOT_SCALE;
+  donutSpotScale = DONUT_SPOT_SCALE;
+  donutClockAngleDeg = model.donutClockAngleDeg || 10;
+  donutClockRadiusScale = model.donutClockRadiusScale || 1.4;
+
   positions = new Float32Array(N * 2);
   data = Array.from({length: N}, (_, i) => i);
-  Sx = new Float32Array(K * N);
-  Sy = new Float32Array(K * N);
 
-  if (!fieldX || !fieldY || fieldX.length !== N || fieldY.length !== N) {
+  if (!scienceFieldX || !scienceFieldY || scienceFieldX.length !== scienceN || scienceFieldY.length !== scienceN) {
     throw new Error('Missing or invalid field_xy arrays in loaded model');
   }
 
@@ -447,35 +572,77 @@ function initModel(initialX, initialY, initialFieldX, initialFieldY, initialSx, 
     throw new Error('Missing Sx/Sy arrays in loaded model');
   }
 
-  if (initialSx.length !== K * N || initialSy.length !== K * N) {
+  if (initialSx.length !== K * scienceN || initialSy.length !== K * scienceN) {
     throw new Error('Loaded sensitivity sizes do not match K*N');
   }
 
+  if (donutN > 0) {
+    if (donutX0.length !== donutN || donutY0.length !== donutN || donutFieldX.length !== donutN || donutFieldY.length !== donutN) {
+      throw new Error('Loaded donut arrays do not match donut_N');
+    }
+    if (!model.donutSx || !model.donutSy || model.donutSx.length !== K * donutN || model.donutSy.length !== K * donutN) {
+      throw new Error('Loaded donut sensitivities do not match K*donut_N');
+    }
+  }
+
+  scienceSx.set(initialSx);
+  scienceSy.set(initialSy);
+  if (donutN > 0) {
+    donutSx.set(model.donutSx);
+    donutSy.set(model.donutSy);
+
+    const nfieldIntra = Number(model.donutNfieldIntra || 0);
+    const nray = Number(model.donutNray || 0);
+    const intraPointCount = nfieldIntra * nray;
+    for (let i = 0; i < donutN; i++) {
+      const isIntra = i < intraPointCount;
+      const center = computeClockedCenter(donutFieldX[i], donutFieldY[i], isIntra);
+      donutCenterX[i] = center.x;
+      donutCenterY[i] = center.y;
+    }
+  }
+
   let maxR2 = 0;
-  for (let i = 0; i < N; i++) {
-    const xx = fieldX[i] + x0[i] * spotScale;
-    const yy = fieldY[i] + y0[i] * spotScale;
+  for (let i = 0; i < scienceN; i++) {
+    const xx = scienceFieldX[i] + scienceX0[i] * spotScale;
+    const yy = scienceFieldY[i] + scienceY0[i] * spotScale;
+    const r2 = xx * xx + yy * yy;
+    if (r2 > maxR2) maxR2 = r2;
+  }
+  for (let i = 0; i < donutN; i++) {
+    const xx = donutCenterX[i] + donutX0[i] * donutSpotScale;
+    const yy = donutCenterY[i] + donutY0[i] * donutSpotScale;
     const r2 = xx * xx + yy * yy;
     if (r2 > maxR2) maxR2 = r2;
   }
   modelRadius = Math.max(1e-6, Math.sqrt(maxR2));
-
-  Sx.set(initialSx);
-  Sy.set(initialSy);
 }
 
 function updatePositions() {
-  for (let i = 0; i < N; i++) {
-    positions[2*i] = fieldX[i] + x0[i] * spotScale;
-    positions[2*i+1] = fieldY[i] + y0[i] * spotScale;
+  for (let i = 0; i < scienceN; i++) {
+    positions[2*i] = scienceFieldX[i] + scienceX0[i] * spotScale;
+    positions[2*i+1] = scienceFieldY[i] + scienceY0[i] * spotScale;
   }
+  for (let i = 0; i < donutN; i++) {
+    const idx = scienceN + i;
+    positions[2*idx] = donutCenterX[i] + donutX0[i] * donutSpotScale;
+    positions[2*idx+1] = donutCenterY[i] + donutY0[i] * donutSpotScale;
+  }
+
   for (let k = 0; k < K; k++) {
     const pk = dofValueToModelUnits(k, p[k]);
     if (pk === 0) continue;
-    const off = k * N;
-    for (let i = 0; i < N; i++) {
-      positions[2*i] += Sx[off + i] * pk * spotScale;
-      positions[2*i+1] += Sy[off + i] * pk * spotScale;
+    const scienceOff = k * scienceN;
+    for (let i = 0; i < scienceN; i++) {
+      positions[2*i] += scienceSx[scienceOff + i] * pk * spotScale;
+      positions[2*i+1] += scienceSy[scienceOff + i] * pk * spotScale;
+    }
+
+    const donutOff = k * donutN;
+    for (let i = 0; i < donutN; i++) {
+      const idx = scienceN + i;
+      positions[2*idx] += donutSx[donutOff + i] * pk * donutSpotScale;
+      positions[2*idx+1] += donutSy[donutOff + i] * pk * donutSpotScale;
     }
   }
 }
@@ -1399,7 +1566,7 @@ async function start() {
   initializeDeck();
   const model = await loadPackedModel('./model_meta.json', './model.f32');
 
-  initModel(model.x, model.y, model.fieldX, model.fieldY, model.sx, model.sy, model.k);
+  initModel(model);
 
   buildSliders();
   resizeDeck();
