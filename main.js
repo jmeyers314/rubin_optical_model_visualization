@@ -63,6 +63,10 @@ let data = [];
 
 // Vmode state
 let norm = null;          // Float64Array(K) — normalization weights
+let rangeWeights = null;  // Float64Array(K)
+let fwhmWeights = null;   // Float64Array(K)
+let rangeNormExp = 1.0;
+let fwhmNormExp = 1.0;
 let wfSens = null;        // Float32Array — wavefront sensitivity matrix (nObs × K)
 let wfSensRows = 0;       // number of observation rows in wfSens
 let currentUseDof = [];   // Int array of active DOF indices
@@ -327,6 +331,9 @@ async function loadPackedModel(metaUrl, modelUrl) {
   const donutSxSpec = layout ? layout.donut_Sx : undefined;
   const donutSySpec = layout ? layout.donut_Sy : undefined;
   const donutFieldSpec = layout ? layout.donut_field_xy : undefined;
+  const rangeWeightsSpec = layout ? layout.range_weights : undefined;
+  const fwhmWeightsSpec = layout ? layout.fwhm_weights : undefined;
+  const wfSensSpec = layout ? layout.wf_sens : undefined;
   if (!spotSpec || !sxSpec || !sySpec || !fieldSpec) {
     throw new Error('Metadata layout must include spot_xy, Sx, Sy, and field_xy blocks');
   }
@@ -362,6 +369,26 @@ async function loadPackedModel(metaUrl, modelUrl) {
     donutFieldLength = Number(donutFieldSpec.length_f32);
   }
 
+  const hasVmodeData = !!(rangeWeightsSpec && fwhmWeightsSpec && wfSensSpec);
+  let rangeWeightsOffset = 0;
+  let rangeWeightsLength = 0;
+  let fwhmWeightsOffset = 0;
+  let fwhmWeightsLength = 0;
+  let wfSensOffset = 0;
+  let wfSensLength = 0;
+  let wfRows = 0;
+  let wfCols = 0;
+  if (hasVmodeData) {
+    rangeWeightsOffset = Number(rangeWeightsSpec.offset_f32);
+    rangeWeightsLength = Number(rangeWeightsSpec.length_f32);
+    fwhmWeightsOffset = Number(fwhmWeightsSpec.offset_f32);
+    fwhmWeightsLength = Number(fwhmWeightsSpec.length_f32);
+    wfSensOffset = Number(wfSensSpec.offset_f32);
+    wfSensLength = Number(wfSensSpec.length_f32);
+    wfRows = wfSensSpec.shape ? Number(wfSensSpec.shape[0]) : 0;
+    wfCols = wfSensSpec.shape ? Number(wfSensSpec.shape[1]) : 0;
+  }
+
   if (
     ![spotOffset, spotLength, sxOffset, sxLength, syOffset, syLength, fieldOffset, fieldLength].every(Number.isInteger)
   ) {
@@ -379,6 +406,16 @@ async function loadPackedModel(metaUrl, modelUrl) {
   ].every(Number.isInteger)) {
     throw new Error('All donut metadata offsets/lengths must be integers');
   }
+  if (hasVmodeData && ![
+    rangeWeightsOffset,
+    rangeWeightsLength,
+    fwhmWeightsOffset,
+    fwhmWeightsLength,
+    wfSensOffset,
+    wfSensLength,
+  ].every(Number.isInteger)) {
+    throw new Error('All vmode metadata offsets/lengths must be integers');
+  }
 
   if (spotLength !== 2 * n || sxLength !== k * n || syLength !== k * n || fieldLength !== 2 * n) {
     throw new Error('Metadata block lengths do not match N/K');
@@ -386,6 +423,17 @@ async function loadPackedModel(metaUrl, modelUrl) {
   if (hasDonuts) {
     if (donutSpotLength !== 2 * donutCount || donutSxLength !== k * donutCount || donutSyLength !== k * donutCount || donutFieldLength !== 2 * donutCount) {
       throw new Error('Donut metadata block lengths do not match donut_N/K');
+    }
+  }
+  if (hasVmodeData) {
+    if (rangeWeightsLength !== k || fwhmWeightsLength !== k) {
+      throw new Error('Vmode weight lengths do not match K');
+    }
+    if (!Number.isInteger(wfRows) || !Number.isInteger(wfCols) || wfRows <= 0 || wfCols !== k) {
+      throw new Error('wf_sens shape is invalid or does not match K');
+    }
+    if (wfSensLength !== wfRows * wfCols) {
+      throw new Error('wf_sens metadata length does not match its shape');
     }
   }
 
@@ -412,6 +460,9 @@ async function loadPackedModel(metaUrl, modelUrl) {
     hasDonuts ? donutSxOffset + donutSxLength : 0,
     hasDonuts ? donutSyOffset + donutSyLength : 0,
     hasDonuts ? donutFieldOffset + donutFieldLength : 0,
+    hasVmodeData ? rangeWeightsOffset + rangeWeightsLength : 0,
+    hasVmodeData ? fwhmWeightsOffset + fwhmWeightsLength : 0,
+    hasVmodeData ? wfSensOffset + wfSensLength : 0,
     hasZernikes ? zk0Offset + zk0Length : 0,
     hasZernikes ? dzkOffset + dzkLength : 0
   );
@@ -465,6 +516,15 @@ async function loadPackedModel(metaUrl, modelUrl) {
     loadedDzk = new Float32Array(packed.subarray(dzkOffset, dzkOffset + dzkLength));
   }
 
+  let loadedRangeWeights = new Float32Array(0);
+  let loadedFwhmWeights = new Float32Array(0);
+  let loadedWfSens = new Float32Array(0);
+  if (hasVmodeData) {
+    loadedRangeWeights = new Float32Array(packed.subarray(rangeWeightsOffset, rangeWeightsOffset + rangeWeightsLength));
+    loadedFwhmWeights = new Float32Array(packed.subarray(fwhmWeightsOffset, fwhmWeightsOffset + fwhmWeightsLength));
+    loadedWfSens = new Float32Array(packed.subarray(wfSensOffset, wfSensOffset + wfSensLength));
+  }
+
   return {
     x,
     y,
@@ -484,6 +544,10 @@ async function loadPackedModel(metaUrl, modelUrl) {
     donutNray: Number(meta.donut_nray || 0),
     donutClockAngleDeg: Number(meta.donut_clock_angle_deg || 10),
     donutClockRadiusScale: Number(meta.donut_clock_radius_scale || 1.4),
+    rangeWeights: loadedRangeWeights,
+    fwhmWeights: loadedFwhmWeights,
+    wfSens: loadedWfSens,
+    wfSensRows: wfRows,
     zk0: loadedZk0,
     dzk: loadedDzk,
     zkCorners,
@@ -622,6 +686,19 @@ function initModel(model) {
   if (model.zk0 && model.zk0.length > 0) {
     zk0 = model.zk0;
     dZk = model.dzk;
+  }
+
+  rangeWeights = null;
+  fwhmWeights = null;
+  wfSens = null;
+  wfSensRows = 0;
+  if (model.rangeWeights && model.fwhmWeights && model.wfSens) {
+    if (model.rangeWeights.length === K && model.fwhmWeights.length === K && model.wfSens.length > 0) {
+      rangeWeights = new Float64Array(model.rangeWeights);
+      fwhmWeights = new Float64Array(model.fwhmWeights);
+      wfSens = model.wfSens;
+      wfSensRows = Number(model.wfSensRows) || 0;
+    }
   }
 
   if (donutN > 0) {
@@ -1281,20 +1358,53 @@ function resetControls() {
     if (sliderInputs[k]) sliderInputs[k].value = '0';
     if (parameterInputs[k]) parameterInputs[k].value = formatControlValue(0);
   }
+  for (let m = 0; m < vValues.length; m++) {
+    vValues[m] = 0;
+    if (vmodeSliderInputs[m]) vmodeSliderInputs[m].value = '0';
+    if (vmodeParamInputs[m]) vmodeParamInputs[m].value = formatControlValue(0);
+  }
   requestUpdate();
 }
 
+function buildNormVector() {
+  if (!rangeWeights || !fwhmWeights || rangeWeights.length !== K || fwhmWeights.length !== K) {
+    return null;
+  }
+  const out = new Float64Array(K);
+  for (let i = 0; i < K; i++) {
+    out[i] = Math.pow(rangeWeights[i], rangeNormExp) * Math.pow(fwhmWeights[i], fwhmNormExp);
+  }
+  return out;
+}
+
 function recomputeVmodes() {
+  const rangeExpInput = document.getElementById('range-exp-input');
+  const fwhmExpInput = document.getElementById('fwhm-exp-input');
   const useDofInput = document.getElementById('use-dof-input');
   const nkeepInput = document.getElementById('nkeep-input');
-  if (!useDofInput || !nkeepInput) return;
+  if (!rangeExpInput || !fwhmExpInput || !useDofInput || !nkeepInput) return;
 
-  currentUseDof = parseUseDof(useDofInput.value);
+  const parsedRangeExp = Number(rangeExpInput.value);
+  const parsedFwhmExp = Number(fwhmExpInput.value);
+  rangeNormExp = Number.isFinite(parsedRangeExp) ? parsedRangeExp : 1.0;
+  fwhmNormExp = Number.isFinite(parsedFwhmExp) ? parsedFwhmExp : 1.0;
+  rangeExpInput.value = String(rangeNormExp);
+  fwhmExpInput.value = String(fwhmNormExp);
+
+  currentUseDof = parseUseDof(useDofInput.value).filter((dof) => dof >= 0 && dof < K);
+  useDofInput.value = formatUseDof(currentUseDof);
   nActive = currentUseDof.length;
-  currentNkeep = Math.max(1, Math.min(nActive, Number(nkeepInput.value) || 12));
-  nkeepInput.value = String(currentNkeep);
+  if (nActive === 0) {
+    currentNkeep = 0;
+    nkeepInput.value = '0';
+  } else {
+    currentNkeep = Math.max(1, Math.min(nActive, Number(nkeepInput.value) || 12));
+    nkeepInput.value = String(currentNkeep);
+  }
 
-  if (norm && wfSens && nActive > 0) {
+  norm = buildNormVector();
+
+  if (norm && wfSens && wfSensRows > 0 && nActive > 0) {
     const result = computeVh(wfSens, wfSensRows, K, norm, currentUseDof, currentNkeep);
     Vh = result.vh;
     fullMixMatrix = result.fullMatrix;
@@ -1318,47 +1428,38 @@ function buildVmodeSliders() {
 
   if (!Vh || currentNkeep <= 0) return;
 
-  // Compute per-mode RMS spot displacement for unit vmode value,
-  // then set range so full deflection ≈ 10 camera pixels (= 10 * GRID_PITCH_WORLD_UNITS).
-  const TARGET_DISPLACEMENT = 5 * GRID_PITCH_WORLD_UNITS;
-  const vmodeRanges = new Float64Array(currentNkeep);
+  // Compute feasible per-mode delta bounds so applying this mode alone
+  // cannot drive any active DOF outside its configured range.
+  const vmodeMins = new Float64Array(currentNkeep);
+  const vmodeMaxs = new Float64Array(currentNkeep);
   for (let m = 0; m < currentNkeep; m++) {
     const rowOff = m * nActive;
-    let sumSq = 0;
-    let count = 0;
-    for (let i = 0; i < N; i++) {
-      let dx = 0, dy = 0;
-      let hasNaN = false;
-      for (let j = 0; j < nActive; j++) {
-        const dofIdx = currentUseDof[j];
-        const vhVal = Vh[rowOff + j];
-        const sxi = Sx[dofIdx * N + i];
-        const syi = Sy[dofIdx * N + i];
-        if (!(isFinite(sxi) && isFinite(syi))) { hasNaN = true; break; }
-        dx += sxi * vhVal;
-        dy += syi * vhVal;
-      }
-      if (hasNaN) continue;
-      sumSq += dx * dx + dy * dy;
-      count++;
-    }
-    const rms = count > 0 ? Math.sqrt(sumSq / count) : 0;
-    const dispRange = rms > 1e-15 ? TARGET_DISPLACEMENT / rms : Infinity;
-
-    // Also limit range so that, starting from zero, no active DOF ever hits
-    // its CONTROL_RANGES limit. Cap = min over j of (range_j / |Vh[m][j]|).
-    let dofCapRange = Infinity;
+    let lower = -Infinity;
+    let upper = Infinity;
     for (let j = 0; j < nActive; j++) {
       const dofIdx = currentUseDof[j];
-      const absVh = Math.abs(Vh[rowOff + j]);
-      if (absVh > 1e-15) {
-        const dofRange = CONTROL_RANGES[dofIdx] != null ? CONTROL_RANGES[dofIdx] : Infinity;
-        dofCapRange = Math.min(dofCapRange, dofRange / absVh);
+      const coeff = Vh[rowOff + j];
+      const dofRange = CONTROL_RANGES[dofIdx] != null ? CONTROL_RANGES[dofIdx] : Infinity;
+      const p0 = p[dofIdx];
+      if (Math.abs(coeff) <= 1e-15 || !isFinite(dofRange)) {
+        continue;
       }
+
+      // p0 + delta*coeff must stay in [-dofRange, +dofRange]
+      const a = (-dofRange - p0) / coeff;
+      const b = (dofRange - p0) / coeff;
+      const thisLow = Math.min(a, b);
+      const thisHigh = Math.max(a, b);
+      if (thisLow > lower) lower = thisLow;
+      if (thisHigh < upper) upper = thisHigh;
     }
 
-    vmodeRanges[m] = Math.min(dispRange, isFinite(dofCapRange) ? dofCapRange : dispRange);
-    if (!isFinite(vmodeRanges[m]) || vmodeRanges[m] <= 0) vmodeRanges[m] = 1;
+    if (!isFinite(lower) || !isFinite(upper) || upper <= lower) {
+      lower = -1;
+      upper = 1;
+    }
+    vmodeMins[m] = lower;
+    vmodeMaxs[m] = upper;
   }
 
   for (let m = 0; m < currentNkeep; m++) {
@@ -1368,27 +1469,28 @@ function buildVmodeSliders() {
     const label = document.createElement('label');
     label.textContent = `V${m + 1}`;
 
-    const modeRange = vmodeRanges[m];
-    const VMODE_STEP = Math.max(modeRange / 200, 1e-6);
+    const modeMin = vmodeMins[m];
+    const modeMax = vmodeMaxs[m];
+    const VMODE_STEP = Math.max((modeMax - modeMin) / 400, 1e-6);
 
     const slider = document.createElement('input');
     slider.type = 'range';
-    slider.min = String(-modeRange);
-    slider.max = String(modeRange);
+    slider.min = String(modeMin);
+    slider.max = String(modeMax);
     slider.step = String(VMODE_STEP);
     slider.value = '0';
 
     const numInput = document.createElement('input');
     numInput.type = 'number';
-    numInput.min = String(-modeRange);
-    numInput.max = String(modeRange);
+    numInput.min = String(modeMin);
+    numInput.max = String(modeMax);
     numInput.step = String(VMODE_STEP);
     numInput.value = formatControlValue(0);
 
     const modeIndex = m; // capture for closure
 
     function applyVmodeDelta(newVal) {
-      const clamped = Math.max(-modeRange, Math.min(modeRange, newVal));
+      const clamped = Math.max(modeMin, Math.min(modeMax, newVal));
       const delta = clamped - vValues[modeIndex];
       vValues[modeIndex] = clamped;
 
@@ -1606,6 +1708,7 @@ async function start() {
   initModel(model);
 
   buildSliders();
+  recomputeVmodes();
   resizeDeck();
   updatePositions();
   posVersion++;
@@ -1672,6 +1775,22 @@ if (includeIntrinsicsCheckbox) {
 const applyVmodesBtn = document.getElementById('apply-vmodes');
 if (applyVmodesBtn) {
   applyVmodesBtn.addEventListener('click', recomputeVmodes);
+}
+const rangeExpInputEl = document.getElementById('range-exp-input');
+if (rangeExpInputEl) {
+  rangeExpInputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); recomputeVmodes(); }
+    if (e.key === 'Escape') { e.preventDefault(); rangeExpInputEl.blur(); }
+  });
+  rangeExpInputEl.addEventListener('change', recomputeVmodes);
+}
+const fwhmExpInputEl = document.getElementById('fwhm-exp-input');
+if (fwhmExpInputEl) {
+  fwhmExpInputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); recomputeVmodes(); }
+    if (e.key === 'Escape') { e.preventDefault(); fwhmExpInputEl.blur(); }
+  });
+  fwhmExpInputEl.addEventListener('change', recomputeVmodes);
 }
 // Also allow Enter in the use_dof and nkeep inputs
 const useDofInputEl = document.getElementById('use-dof-input');

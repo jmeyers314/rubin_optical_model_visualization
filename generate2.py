@@ -49,6 +49,9 @@ sensitivity_path = (
 with open(sensitivity_path, "r") as f:
     sensitivity = np.array(yaml.safe_load(f))
 
+wf_sens_matrix = sensitivity.reshape(-1, sensitivity.shape[-1]).astype(np.float32)
+WF_SENS_ROWS, WF_SENS_COLS = wf_sens_matrix.shape
+
 sf = StateFactory(sensitivity, norm=range_weights * fwhm_weights)
 
 science_field = model.make_hex_field(outer=1.75 * u.deg, nrad=5)
@@ -213,6 +216,13 @@ donut_field_offset = donut_sy_offset + donut_sy_flat.size
 
 zk0_offset = donut_field_offset + donut_field_xy.size
 dzk_offset = zk0_offset + zk0_flat.size
+range_weights_flat = range_weights.astype(np.float32).ravel(order="C")
+fwhm_weights_flat = fwhm_weights.astype(np.float32).ravel(order="C")
+wf_sens_flat = wf_sens_matrix.ravel(order="C")
+
+range_weights_offset = dzk_offset + dzk_flat.size
+fwhm_weights_offset = range_weights_offset + range_weights_flat.size
+wf_sens_offset = fwhm_weights_offset + fwhm_weights_flat.size
 
 packed = np.concatenate([
     spot_xy,
@@ -225,11 +235,14 @@ packed = np.concatenate([
     donut_field_xy,
     zk0_flat,
     dzk_flat,
+    range_weights_flat,
+    fwhm_weights_flat,
+    wf_sens_flat,
 ])
 packed.tofile("model.f32")
 
 meta = {
-    "version": 6,
+    "version": 7,
     "dtype": "float32",
     "N": int(N),
     "K": int(K_dof),
@@ -297,6 +310,27 @@ meta = {
             "shape": [int(ZK_CORNERS), int(ZK_TERMS), int(K_dof)],
             "order": "C",
             "units": "nm_per_dof_unit",
+        },
+        "range_weights": {
+            "offset_f32": int(range_weights_offset),
+            "length_f32": int(range_weights_flat.size),
+            "shape": [int(range_weights_flat.size)],
+            "order": "C",
+            "units": "f_basis",
+        },
+        "fwhm_weights": {
+            "offset_f32": int(fwhm_weights_offset),
+            "length_f32": int(fwhm_weights_flat.size),
+            "shape": [int(fwhm_weights_flat.size)],
+            "order": "C",
+            "units": "f_basis",
+        },
+        "wf_sens": {
+            "offset_f32": int(wf_sens_offset),
+            "length_f32": int(wf_sens_flat.size),
+            "shape": [int(WF_SENS_ROWS), int(WF_SENS_COLS)],
+            "order": "C",
+            "units": "dz_per_f_basis",
         },
     },
 }
