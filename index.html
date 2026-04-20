@@ -67,6 +67,9 @@
     .slider-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; min-height: 0; align-items: start; }
     .control-column { min-width: 0; }
     .control-title { font-size: 12px; font-weight: 600; margin: 4px 0 8px; }
+    .app-title { font-weight: 600; margin-bottom: 6px; }
+    .intrinsics-label { font-size: 12px; margin-left: 10px; }
+    .mono-input-small { font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
     #mixing-matrix-canvas {
       display: block;
       margin-top: 8px;
@@ -260,10 +263,10 @@
 </head>
 <body>
   <div id="ui">
-    <div style="font-weight:600; margin-bottom:6px;">Rubin Observatory Optical Sensitivity Model</div>
+    <div class="app-title">Rubin Observatory Optical Sensitivity Model</div>
     <div class="controls">
       <button id="reset-controls" class="btn" type="button" disabled>Loading…</button>
-      <label style="font-size:12px; margin-left:10px;">
+      <label class="intrinsics-label">
         <input id="include-intrinsics" type="checkbox" checked> Include intrinsics
       </label>
     </div>
@@ -276,34 +279,34 @@
         <div class="control-title">V-Mode Controls</div>
         <div class="row">
           <label>Range exp</label>
-          <input id="range-exp-input" type="number" value="0.5" step="0.1">
+          <input id="range-exp-input" type="number" step="0.1">
           <span></span>
         </div>
         <div class="row">
           <label>FWHM exp</label>
-          <input id="fwhm-exp-input" type="number" value="-0.5" step="0.1">
+          <input id="fwhm-exp-input" type="number" step="0.1">
           <span></span>
         </div>
         <div class="row">
           <label>Use DOFs</label>
-          <input id="use-dof-input" type="text" value="0-16,30-34" style="font-family: ui-monospace, Menlo, monospace; font-size: 11px;">
+          <input id="use-dof-input" class="mono-input-small" type="text">
           <button id="apply-vmodes" class="btn" type="button">Apply</button>
         </div>
         <div class="row">
           <label>N keep</label>
-          <input id="nkeep-input" type="number" min="1" max="50" value="12">
+          <input id="nkeep-input" type="number" min="1" max="50">
           <span></span>
         </div>
         <div id="vmode-sliders"></div>
         <canvas id="mixing-matrix-canvas" aria-label="V-mode mixing matrix"></canvas>
         <div class="row">
           <label>Max field</label>
-          <input id="dz-field-max-input" type="number" min="1" value="3">
+          <input id="dz-field-max-input" type="number" min="1">
           <span></span>
         </div>
         <div class="row">
           <label>Max pupil</label>
-          <input id="dz-pupil-max-input" type="number" min="4" value="11">
+          <input id="dz-pupil-max-input" type="number" min="4">
           <span></span>
         </div>
         <canvas id="dz-sens-canvas" aria-label="DZ sensitivity per V-mode"></canvas>
