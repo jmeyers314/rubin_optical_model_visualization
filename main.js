@@ -1357,11 +1357,6 @@ function buildSliders() {
 }
 
 function resetControls() {
-  const rangeExpInput = document.getElementById('range-exp-input');
-  const fwhmExpInput = document.getElementById('fwhm-exp-input');
-  const useDofInput = document.getElementById('use-dof-input');
-  const nkeepInput = document.getElementById('nkeep-input');
-
   for (let k = 0; k < K; k++) {
     p[k] = 0;
     if (sliderInputs[k]) sliderInputs[k].value = '0';
@@ -1373,15 +1368,8 @@ function resetControls() {
     if (vmodeParamInputs[m]) vmodeParamInputs[m].value = formatControlValue(0);
   }
 
-  rangeNormExp = DEFAULT_RANGE_NORM_EXP;
-  fwhmNormExp = DEFAULT_FWHM_NORM_EXP;
-  currentNkeep = DEFAULT_NKEEP;
-  if (rangeExpInput) rangeExpInput.value = String(DEFAULT_RANGE_NORM_EXP);
-  if (fwhmExpInput) fwhmExpInput.value = String(DEFAULT_FWHM_NORM_EXP);
-  if (useDofInput) useDofInput.value = DEFAULT_USE_DOF;
-  if (nkeepInput) nkeepInput.value = String(DEFAULT_NKEEP);
-
-  recomputeVmodes();
+  rebuildVmodeUI();
+  requestUpdate();
 }
 
 function buildNormVector() {
@@ -1431,7 +1419,10 @@ function recomputeVmodes() {
     fullMixMatrix = null;
   }
 
-  // Reset vmode values and rebuild sliders
+  rebuildVmodeUI();
+}
+
+function rebuildVmodeUI() {
   vValues = new Array(currentNkeep).fill(0);
   buildVmodeSliders();
   drawMixingMatrix();
