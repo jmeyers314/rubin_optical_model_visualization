@@ -42,11 +42,12 @@ const SPOT_SCALE = 3e-3;
 const DONUT_SPOT_SCALE = 5e-4;
 const ARCSEC_PER_DEGREE = 3600;
 const ANGULAR_DOF_INDICES = new Set([3, 4, 8, 9]);
-const DEFAULT_RANGE_NORM_EXP = 1.0;
-const DEFAULT_FWHM_NORM_EXP = 1.0;
+const DEFAULT_RANGE_NORM_EXP = 0.5;
+const DEFAULT_FWHM_NORM_EXP = -0.5;
 const DEFAULT_USE_DOF = '0-16,30-34';
 const DEFAULT_NKEEP = 12;
 const DEFAULT_DZ_FIELD_MAX = 3;
+const DEFAULT_DZ_PUPIL_MAX = 11;
 const ENABLE_DZ_SENS_PLOT = true;
 
 let p = new Float32Array(K);
@@ -80,6 +81,7 @@ let currentUseDof = [];   // Int array of active DOF indices
 let currentNkeep = DEFAULT_NKEEP;
 let Vh = null;            // Float64Array — (nkeep × nActive) mixing matrix
 let fullMixMatrix = null; // Float64Array — (nActive × nActive) full eigenvector matrix
+let singularValues = null; // Float64Array — singular values for all active v-modes
 let nActive = 0;          // len(currentUseDof)
 let vValues = [];         // current vmode slider values
 let vmodeSliderInputs = [];
@@ -289,21 +291,23 @@ function computeVh(sens, sensRows, sensK, normArr, useDof, nkeep) {
     }
   }
 
-  const {vectors} = jacobiEigen(G);
+  const {values, vectors} = jacobiEigen(G);
 
   // Vh = top nkeep eigenvectors as rows, denormalized
   // vectors is column-major: vectors[row * nAct + col] where col = eigenvector index
   const nk = Math.min(nkeep, nAct);
   const vh = new Float64Array(nk * nAct);
   const fullMatrix = new Float64Array(nAct * nAct);
+  const sigma = new Float64Array(nAct);
   for (let mode = 0; mode < nAct; mode++) {
+    sigma[mode] = Math.sqrt(Math.max(0, values[mode]));
     for (let j = 0; j < nAct; j++) {
       const val = vectors[j * nAct + mode] * normArr[useDof[j]];
       fullMatrix[mode * nAct + j] = val;
       if (mode < nk) vh[mode * nAct + j] = val;
     }
   }
-  return {vh, fullMatrix};
+  return {vh, fullMatrix, singularValues: sigma};
 }
 
 async function loadPackedModel(metaUrl, modelUrl) {
@@ -786,6 +790,7 @@ const zoomInBtn = document.getElementById('zoom-in');
 const zoomOutBtn = document.getElementById('zoom-out');
 const zoomResetBtn = document.getElementById('zoom-reset');
 const dzFieldMaxInputEl = document.getElementById('dz-field-max-input');
+const dzPupilMaxInputEl = document.getElementById('dz-pupil-max-input');
 const SCALE_BAR_WORLD_UNITS = 0.1;
 const GRID_PITCH_WORLD_UNITS = 0.048;
 const GRID_MAJOR_EVERY = 5;
@@ -1421,9 +1426,11 @@ function recomputeVmodes() {
     const result = computeVh(wfSens, wfSensRows, K, norm, currentUseDof, currentNkeep);
     Vh = result.vh;
     fullMixMatrix = result.fullMatrix;
+    singularValues = result.singularValues;
   } else {
     Vh = null;
     fullMixMatrix = null;
+    singularValues = null;
   }
 
   rebuildVmodeUI();
@@ -1609,7 +1616,7 @@ function drawMixingMatrix() {
   const canvas = document.getElementById('mixing-matrix-canvas');
   if (!canvas) return;
 
-  if (!fullMixMatrix || nActive <= 0) {
+  if (!fullMixMatrix || !singularValues || nActive <= 0) {
     canvas.width = 0;
     canvas.height = 0;
     canvas.style.width = '0';
@@ -1620,13 +1627,16 @@ function drawMixingMatrix() {
   const CELL = 14;
   const LEFT_PAD = 18;
   const LABEL_W = 75;
+  const SV_H = 84;
+  const SV_GAP = 8;
   const BOTTOM_H = 32;
   const TOP_PAD = 2;
   const nModes = nActive;
   const nDofs = nActive;
+  const matrixTop = TOP_PAD + SV_H + SV_GAP;
 
   const canvasW = LEFT_PAD + LABEL_W + nModes * CELL;
-  const canvasH = TOP_PAD + nDofs * CELL + BOTTOM_H;
+  const canvasH = matrixTop + nDofs * CELL + BOTTOM_H;
 
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.ceil(canvasW * dpr);
@@ -1654,12 +1664,109 @@ function drawMixingMatrix() {
   }
   if (vmax < 1e-15) vmax = 1;
 
+  const plotLeft = LEFT_PAD + LABEL_W;
+  const plotRight = plotLeft + nModes * CELL;
+  const svTop = TOP_PAD;
+  const svBottom = svTop + SV_H;
+  let svMinLog = Infinity;
+  let svMaxLog = -Infinity;
+  for (let mode = 0; mode < nModes; mode++) {
+    const sigma = singularValues[mode];
+    if (sigma <= 0) continue;
+    const logSigma = Math.log10(sigma);
+    if (logSigma < svMinLog) svMinLog = logSigma;
+    if (logSigma > svMaxLog) svMaxLog = logSigma;
+  }
+  if (!Number.isFinite(svMinLog) || !Number.isFinite(svMaxLog)) {
+    svMinLog = 0;
+    svMaxLog = 1;
+  } else if (!(svMaxLog > svMinLog)) {
+    svMinLog -= 0.5;
+    svMaxLog += 0.5;
+  }
+
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.15)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(plotLeft, svTop, nModes * CELL, SV_H);
+
+  // Y ticks at powers of ten for readability.
+  const tickPowers = [];
+  const minPow = Math.ceil(svMinLog);
+  const maxPow = Math.floor(svMaxLog);
+  if (maxPow >= minPow) {
+    for (let p = minPow; p <= maxPow; p++) tickPowers.push(p);
+  } else {
+    tickPowers.push(Math.round(svMinLog));
+  }
+  if (tickPowers.length > 6) {
+    const stride = Math.ceil(tickPowers.length / 6);
+    const reduced = [];
+    for (let i = 0; i < tickPowers.length; i += stride) reduced.push(tickPowers[i]);
+    if (reduced[reduced.length - 1] !== tickPowers[tickPowers.length - 1]) {
+      reduced.push(tickPowers[tickPowers.length - 1]);
+    }
+    tickPowers.length = 0;
+    tickPowers.push(...reduced);
+  }
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.35)';
+  ctx.fillStyle = '#333';
+  ctx.font = '8px ui-monospace, Menlo, monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (const p of tickPowers) {
+    const y = svBottom - ((p - svMinLog) / (svMaxLog - svMinLog)) * SV_H;
+    ctx.beginPath();
+    ctx.moveTo(plotLeft - 4, y);
+    ctx.lineTo(plotLeft, y);
+    ctx.stroke();
+    ctx.fillText(String(p), plotLeft - 6, y);
+  }
+
+  ctx.beginPath();
+  let started = false;
+  for (let mode = 0; mode < nModes; mode++) {
+    const sigma = singularValues[mode];
+    const x = plotLeft + mode * CELL + CELL / 2;
+    const y = sigma > 0
+      ? svBottom - ((Math.log10(sigma) - svMinLog) / (svMaxLog - svMinLog)) * SV_H
+      : svBottom;
+    if (!started) {
+      ctx.moveTo(x, y);
+      started = true;
+    } else {
+      ctx.lineTo(x, y);
+    }
+  }
+  ctx.strokeStyle = '#222';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.fillStyle = '#222';
+  for (let mode = 0; mode < nModes; mode++) {
+    const sigma = singularValues[mode];
+    const x = plotLeft + mode * CELL + CELL / 2;
+    const y = sigma > 0
+      ? svBottom - ((Math.log10(sigma) - svMinLog) / (svMaxLog - svMinLog)) * SV_H
+      : svBottom;
+    ctx.beginPath();
+    ctx.arc(x, y, 1.75, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+
+  ctx.save();
+  ctx.translate(8, svTop + SV_H / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('Log S.V.', 0, 0);
+  ctx.restore();
+
   // Draw cells (origin="lower": DOF index 0 at bottom)
   for (let mode = 0; mode < nModes; mode++) {
     for (let j = 0; j < nDofs; j++) {
       const val = normMix[mode * nActive + j];
       ctx.fillStyle = bwrColor(val / vmax);
-      ctx.fillRect(LEFT_PAD + LABEL_W + mode * CELL, TOP_PAD + (nDofs - 1 - j) * CELL, CELL, CELL);
+      ctx.fillRect(plotLeft + mode * CELL, matrixTop + (nDofs - 1 - j) * CELL, CELL, CELL);
     }
   }
 
@@ -1667,7 +1774,11 @@ function drawMixingMatrix() {
   if (currentNkeep < nModes) {
     ctx.fillStyle = 'rgba(120, 120, 120, 0.45)';
     ctx.fillRect(
-      LEFT_PAD + LABEL_W + currentNkeep * CELL, TOP_PAD,
+      plotLeft + currentNkeep * CELL, svTop,
+      (nModes - currentNkeep) * CELL, SV_H
+    );
+    ctx.fillRect(
+      plotLeft + currentNkeep * CELL, matrixTop,
       (nModes - currentNkeep) * CELL, nDofs * CELL
     );
   }
@@ -1677,10 +1788,10 @@ function drawMixingMatrix() {
   ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)';
   ctx.lineWidth = 1;
   for (const bIdx of bounds) {
-    const y = TOP_PAD + (nDofs - 1 - bIdx) * CELL;
+    const y = matrixTop + (nDofs - 1 - bIdx) * CELL;
     ctx.beginPath();
-    ctx.moveTo(LEFT_PAD + LABEL_W, y);
-    ctx.lineTo(LEFT_PAD + LABEL_W + nModes * CELL, y);
+    ctx.moveTo(plotLeft, y);
+    ctx.lineTo(plotRight, y);
     ctx.stroke();
   }
 
@@ -1693,23 +1804,23 @@ function drawMixingMatrix() {
     const dofIdx = currentUseDof[j];
     const full = CONTROL_NAMES[dofIdx] || ('DOF ' + dofIdx);
     const name = full.replace(/\s*\[.*\]$/, '');
-    ctx.fillText(name, LEFT_PAD + LABEL_W - 3, TOP_PAD + (nDofs - 1 - j) * CELL + CELL / 2);
+    ctx.fillText(name, LEFT_PAD + LABEL_W - 3, matrixTop + (nDofs - 1 - j) * CELL + CELL / 2);
   }
 
   // X-axis labels (mode numbers)
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   for (let m = 0; m < nModes; m++) {
-    ctx.fillText(String(m + 1), LEFT_PAD + LABEL_W + m * CELL + CELL / 2, TOP_PAD + nDofs * CELL + 2);
+    ctx.fillText(String(m + 1), plotLeft + m * CELL + CELL / 2, matrixTop + nDofs * CELL + 2);
   }
 
   ctx.font = '10px ui-sans-serif, system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
-  ctx.fillText('Vmode', LEFT_PAD + LABEL_W + (nModes * CELL) / 2, TOP_PAD + nDofs * CELL + 16);
+  ctx.fillText('Vmode', plotLeft + (nModes * CELL) / 2, matrixTop + nDofs * CELL + 16);
 
   ctx.save();
-  ctx.translate(8, TOP_PAD + (nDofs * CELL) / 2);
+  ctx.translate(8, matrixTop + (nDofs * CELL) / 2);
   ctx.rotate(-Math.PI / 2);
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
@@ -1730,6 +1841,22 @@ function getDzFieldMax() {
   const requested = Number.isFinite(parsed) ? parsed : DEFAULT_DZ_FIELD_MAX;
   const clamped = Math.max(1, Math.min(maxAvailable, requested));
   dzFieldMaxInputEl.value = String(clamped);
+  return clamped;
+}
+
+function getDzPupilMax() {
+  const maxAvailable = wfSensNPupilZk > 0
+    ? Math.max(4, wfSensNPupilZk - 1)
+    : DEFAULT_DZ_PUPIL_MAX;
+
+  if (!dzPupilMaxInputEl) {
+    return Math.min(DEFAULT_DZ_PUPIL_MAX, maxAvailable);
+  }
+
+  const parsed = Math.trunc(Number(dzPupilMaxInputEl.value));
+  const requested = Number.isFinite(parsed) ? parsed : DEFAULT_DZ_PUPIL_MAX;
+  const clamped = Math.max(4, Math.min(maxAvailable, requested));
+  dzPupilMaxInputEl.value = String(clamped);
   return clamped;
 }
 
@@ -1757,8 +1884,9 @@ function drawDzSensPlot() {
   // The packed sensitivity tensor preserves these as direct indices,
   // so (1, 4) maps to sensitivity[1, 4, :], not [0, 3, :].
   const fieldMax = getDzFieldMax();
+  const pupilMax = getDzPupilMax();
   const FIELD_DZS = Array.from({length: fieldMax}, (_, index) => index + 1);
-  const PUPIL_ZKS = [4, 5, 6, 7, 8, 9, 10, 11];
+  const PUPIL_ZKS = Array.from({length: pupilMax - 3}, (_, index) => index + 4);
 
   const dzFlatRows = [];
   const dzLabels = [];
@@ -2000,6 +2128,13 @@ if (dzFieldMaxInputEl) {
     if (e.key === 'Escape') { e.preventDefault(); dzFieldMaxInputEl.blur(); }
   });
   dzFieldMaxInputEl.addEventListener('change', drawDzSensPlot);
+}
+if (dzPupilMaxInputEl) {
+  dzPupilMaxInputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); drawDzSensPlot(); }
+    if (e.key === 'Escape') { e.preventDefault(); dzPupilMaxInputEl.blur(); }
+  });
+  dzPupilMaxInputEl.addEventListener('change', drawDzSensPlot);
 }
 
 vis.addEventListener('mousemove', updateMouseCoords);
