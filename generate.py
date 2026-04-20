@@ -1,265 +1,340 @@
-# Generate initial points and sensitivity
-
 import os
+from dataclasses import replace
 from pathlib import Path
 
-import numpy as np
-import batoid
-from batoid_rubin import LSSTBuilder
 import json
+import astropy.units as u
+import batoid
+import numpy as np
 import yaml
-from star_sharp import StarSharp, PUPIL_OUTER, PUPIL_INNER
+from astropy.coordinates import Angle
+from batoid_rubin import LSSTBuilder
+from lsst.obs.lsst import LsstCam
+from StarSharp import RaytracedOpticalModel, StateFactory
 from tqdm import tqdm
 
-# Load normalization weights and sensitivity matrix from ts_config_mttcs
-mttcs_dir = Path(os.environ["TS_CONFIG_MTTCS_DIR"])
-mtaos_dir = mttcs_dir / "MTAOS/v13/ofc/"
-
-senspath = mtaos_dir / "sensitivity_matrix" / "lsst_sensitivity_dz_31_29_50.yaml"
-with open(senspath, "r") as f:
-    wf_sens = np.array(yaml.safe_load(f), dtype=np.float32)
-# wf_sens shape: (31, 29, 50) -> flatten field*zk dimensions -> (31*29, 50)
-wf_sens = wf_sens.reshape(-1, wf_sens.shape[-1])
-
-normpath = mtaos_dir / "normalization_weights" / "range-fwhm.yaml"
-with open(normpath, "r") as f:
-    norm = np.array(yaml.safe_load(f), dtype=np.float64)
-
-# Adjust units from ts_config_mttcs (deg) to our model (arcsec)
-wf_sens[..., [3,4,8,9]] /= 3600
-norm[[3,4,8,9]] *= 3600
-
-ssh = StarSharp(
-    "i",
-    transverse_pupil_radii = 12,
-    transverse_field_radii = 5,
-    use_dof="0-9,10-16,30-34",
-    nkeep=12,
-    tqdm=tqdm
+camera = LsstCam().getCamera()
+fiducial = batoid.Optic.fromYaml("LSST_r.yaml")
+builder = LSSTBuilder(
+    fiducial,
+    dof_coord_system="OCS",
+    flip_m2_bending_modes=False,
+    dof_angle_units="degree",
+    inex_optic="Detector",
+)
+model = RaytracedOpticalModel(
+    builder,
+    rtp=Angle("0 deg"),
+    wavelength=620 * u.nm,
+    camera=camera,
 )
 
-x0 = ssh.x0
-y0 = ssh.y0
-dx = ssh.dx
-dy = ssh.dy
+# Load sensitivity and normalization from ts_config_mttcs / ts_ofc
+range_weight_path = (
+    Path(os.environ["TS_OFC_DIR"]) / "policy" / "normalization_weights" / "range.yaml"
+)
+with open(range_weight_path, "r") as f:
+    range_weights = np.array(yaml.safe_load(f))
+fwhm_weight_path = (
+    Path(os.environ["TS_OFC_DIR"]) / "policy" / "normalization_weights" / "fwhm.yaml"
+)
+with open(fwhm_weight_path, "r") as f:
+    fwhm_weights = np.array(yaml.safe_load(f))
+sensitivity_path = (
+    Path(os.environ["TS_OFC_DIR"])
+    / "policy"
+    / "sensitivity_matrix"
+    / "lsst_sensitivity_dz_31_29_50.yaml"
+)
+with open(sensitivity_path, "r") as f:
+    sensitivity = np.array(yaml.safe_load(f))
 
-factor = 3e3
-x0 *= factor
-y0 *= factor
+wf_sens_matrix = sensitivity.reshape(-1, sensitivity.shape[-1]).astype(np.float32)
+WF_SENS_ROWS, WF_SENS_COLS = wf_sens_matrix.shape
 
-for i, (u, v) in enumerate(zip(ssh.field_u, ssh.field_v)):
-    x0[i] += u
-    y0[i] += v
+sf = StateFactory(sensitivity, norm=range_weights * fwhm_weights)
 
-# Now the sensitivity
-dx *= factor
-dy *= factor
+science_field = model.make_hex_field(outer=1.75 * u.deg, nrad=5)
+intra_donut_field = model.make_ccd_field(nx=1, types="ITL_WF", detnums=[192, 196, 200, 204])
+extra_donut_field = model.make_ccd_field(nx=1, types="ITL_WF", detnums=[191, 195, 199, 203])
 
-Sx = dx
-Sy = dy
+# Hard-coding the step sizes here for now.
+steps = [
+    10.0,
+    100.0, 100.0,
+    0.001, 0.001,
+    10.0,
+    200.0, 200.0,
+    0.001, 0.001,
+] + [0.1] * 40
 
-# Add donuts
+science_spots_sensitivity = model.spots_sensitivity(
+    science_field,
+    steps=sf.from_f(steps),
+    nrad=12,
+    include_chip_heights=False,
+    tqdm=tqdm,
+)
 
-donut_factor = 5e2
-
-pupil_x,pupil_y = batoid.utils.hexapolar(
-    outer=PUPIL_OUTER*0.99,  # Avoid clipping the actual pupil
-    inner=PUPIL_INNER*1.01,
+intra_donut_spots_sensitivity = model.spots_sensitivity(
+    intra_donut_field,
+    steps=sf.from_f(steps),
     nrad=20,
-    naz=int(2 * np.pi * PUPIL_OUTER / (PUPIL_OUTER - PUPIL_INNER) * 20),
+    include_chip_heights=False,
+    tqdm=tqdm,
+    focus="intra",
+)
+extra_donut_spots_sensitivity = model.spots_sensitivity(
+    extra_donut_field,
+    steps=sf.from_f(steps),
+    nrad=20,
+    include_chip_heights=False,
+    tqdm=tqdm,
+    focus="extra",
 )
 
-intra = ssh.fiducial.withGloballyShiftedOptic("Detector", [0, 0, -1.5e-3])
-extra = ssh.fiducial.withGloballyShiftedOptic("Detector", [0, 0, +1.5e-3])
-builder = LSSTBuilder(ssh.fiducial)
-builder_in = LSSTBuilder(intra)
-builder_ex = LSSTBuilder(extra)
+corner_x = 0.5*(intra_donut_field.x + extra_donut_field.x)
+corner_y = 0.5*(intra_donut_field.y + extra_donut_field.y)
+corner_field = replace(intra_donut_field, x=corner_x, y=corner_y)
+corner_zernikes_sensitivity = model.zernikes_sensitivity(
+    corner_field,
+    steps=sf.from_f(steps),
+    include_chip_heights=False,
+    tqdm=tqdm,
+)
 
-# Add intrafocal donuts
-xd = np.empty((8, len(pupil_x)))
-yd = np.empty((8, len(pupil_y)))
-SXd = np.empty((8, len(pupil_x), ssh.n_dof))
-SYd = np.empty((8, len(pupil_y), ssh.n_dof))
+# Zernike nominal (intrinsic) and gradient: shape (nfield, jmax+1) and (K, nfield, jmax+1)
+# Store in nm; JS index: (cornerIndex * nterms + termIndex) * K + dofIndex
+zk0_arr = corner_zernikes_sensitivity.nominal.coefs.to_value("nm")  # (nfield, jmax+1)
+dzk_arr = corner_zernikes_sensitivity.gradient.coefs.to_value("nm")  # (K, nfield, jmax+1)
+ZK_CORNERS, ZK_TERMS = zk0_arr.shape  # (4, 29)
+# Reshape dzk to (nfield, jmax+1, K) for JS index ordering, then ravel
+dzk_arr_reordered = np.transpose(dzk_arr, (1, 2, 0))  # (nfield, jmax+1, K)
+zk0_flat = zk0_arr.ravel(order="C").astype(np.float32)
+dzk_flat = dzk_arr_reordered.ravel(order="C").astype(np.float32)
 
-# Add donut intrinsic and sensitivity Zernikes
-jmax = 28
-zk0 = np.empty((4, jmax+1))
-dzk = np.empty((4, jmax+1, ssh.n_dof))
+x0 = science_spots_sensitivity.nominal.dx.to_value("micron")
+y0 = science_spots_sensitivity.nominal.dy.to_value("micron")
+science_vignetted = science_spots_sensitivity.nominal.vignetted
+x0[science_vignetted] = np.nan
+y0[science_vignetted] = np.nan
+dx = science_spots_sensitivity.gradient.dx.to_value("micron")
+dy = science_spots_sensitivity.gradient.dy.to_value("micron")
 
-bar = tqdm(total=ssh.n_dof*8, desc="Generating sensitivity")
-for idof, (step, sign) in enumerate(zip(ssh._steps, ssh.dof_signs)):
-    dof = np.zeros(ssh.n_dof)
-    dof[idof] = step * sign
-    perturbed = builder.with_aos_dof(dof).build()
-    perturbed_in = builder_in.with_aos_dof(dof).build()
-    perturbed_ex = builder_ex.with_aos_dof(dof).build()
+nfield, nray = x0.shape
+K_dof = dx.shape[0]
+N = nfield * nray
 
-    for i, corner in enumerate([(-1.25, -1.25), (-1.25, 1.25), (1.25, -1.25), (1.25, 1.25)]):
-        # Intra
-        rays = batoid.RayVector.fromStop(
-            np.array(pupil_x),
-            np.array(pupil_y),
-            theta_x=np.deg2rad(corner[0]),
-            theta_y=np.deg2rad(corner[1]),
-            optic=intra,
-            wavelength=ssh.wavelength,
-        )
-        frays = intra.trace(rays.copy())
-        prays = perturbed_in.trace(rays.copy())
-        vignetted = frays.vignetted
+# Field positions in degrees (OCS angles from science_field)
+field_thx = science_field.x.to_value("deg")
+field_thy = science_field.y.to_value("deg")
 
-        meandx = np.nanmean(prays.x - frays.x)
-        meandy = np.nanmean(prays.y - frays.y)
+# Flatten to N = nfield * nray points (C order)
+x0_flat = x0.ravel().astype(np.float32)
+y0_flat = y0.ravel().astype(np.float32)
+Sx = dx.reshape(K_dof, N).astype(np.float32)
+Sy = dy.reshape(K_dof, N).astype(np.float32)
 
-        SXd[i, :, idof] = (prays.x - frays.x - meandx) / step
-        SYd[i, :, idof] = (prays.y - frays.y - meandy) / step
-        SXd[i, vignetted, idof] = np.nan
-        SYd[i, vignetted, idof] = np.nan
+# Per-ray field offsets: each field position repeated nray times
+field_x_flat = np.repeat(field_thx, nray).astype(np.float32)
+field_y_flat = np.repeat(field_thy, nray).astype(np.float32)
 
-        zkf = batoid.zernikeGQ(
-            ssh.fiducial,
-            np.deg2rad(corner[0]), np.deg2rad(corner[1]),
-            ssh.wavelength,
-            rings=10, jmax=28, eps=0.612
-        ) * ssh.wavelength * 1e9
-        zkp = batoid.zernikeGQ(
-            perturbed,
-            np.deg2rad(corner[0]), np.deg2rad(corner[1]),
-            ssh.wavelength,
-            rings=10, jmax=28, eps=0.612
-        ) * ssh.wavelength * 1e9
-        dzk[i, :, idof] = (zkp - zkf) / step
+donut_intra_x0 = intra_donut_spots_sensitivity.nominal.dx.to_value("micron")
+donut_intra_y0 = intra_donut_spots_sensitivity.nominal.dy.to_value("micron")
+donut_intra_vignetted = intra_donut_spots_sensitivity.nominal.vignetted
+donut_intra_x0[donut_intra_vignetted] = np.nan
+donut_intra_y0[donut_intra_vignetted] = np.nan
+donut_intra_dx = intra_donut_spots_sensitivity.gradient.dx.to_value("micron")
+donut_intra_dy = intra_donut_spots_sensitivity.gradient.dy.to_value("micron")
 
-        if idof == 0:
-            xd[i] = np.array(frays.x)
-            yd[i] = np.array(frays.y)
-            xd[i][vignetted] = np.nan
-            yd[i][vignetted] = np.nan
-            xd[i] -= np.nanmean(xd[i])
-            yd[i] -= np.nanmean(yd[i])
+donut_extra_x0 = extra_donut_spots_sensitivity.nominal.dx.to_value("micron")
+donut_extra_y0 = extra_donut_spots_sensitivity.nominal.dy.to_value("micron")
+donut_extra_vignetted = extra_donut_spots_sensitivity.nominal.vignetted
+donut_extra_x0[donut_extra_vignetted] = np.nan
+donut_extra_y0[donut_extra_vignetted] = np.nan
+donut_extra_dx = extra_donut_spots_sensitivity.gradient.dx.to_value("micron")
+donut_extra_dy = extra_donut_spots_sensitivity.gradient.dy.to_value("micron")
 
-            xd[i] *= donut_factor
-            yd[i] *= donut_factor
-            dth = 10
-            sdth, cdth = np.sin(np.deg2rad(dth)), np.cos(np.deg2rad(dth))
+donut_x0 = np.concatenate([donut_intra_x0, donut_extra_x0], axis=0)
+donut_y0 = np.concatenate([donut_intra_y0, donut_extra_y0], axis=0)
+donut_dx = np.concatenate([donut_intra_dx, donut_extra_dx], axis=1)
+donut_dy = np.concatenate([donut_intra_dy, donut_extra_dy], axis=1)
 
-            dx = cdth * corner[0] - sdth * corner[1]
-            dy = sdth * corner[0] + cdth * corner[1]
-            xd[i] += dx*1.4
-            yd[i] += dy*1.4
+donut_nfield, donut_nray = donut_x0.shape
+donut_N = donut_nfield * donut_nray
 
-            zk0[i] = zkf
+intra_ocs = intra_donut_field.angle.ocs
+extra_ocs = extra_donut_field.angle.ocs
+donut_field_thx = np.concatenate([
+    intra_ocs.x.to_value("deg"),
+    extra_ocs.x.to_value("deg"),
+])
+donut_field_thy = np.concatenate([
+    intra_ocs.y.to_value("deg"),
+    extra_ocs.y.to_value("deg"),
+])
 
-        bar.update(1)
+donut_x0_flat = donut_x0.ravel().astype(np.float32)
+donut_y0_flat = donut_y0.ravel().astype(np.float32)
+donut_Sx = donut_dx.reshape(K_dof, donut_N).astype(np.float32)
+donut_Sy = donut_dy.reshape(K_dof, donut_N).astype(np.float32)
+donut_field_x_flat = np.repeat(donut_field_thx, donut_nray).astype(np.float32)
+donut_field_y_flat = np.repeat(donut_field_thy, donut_nray).astype(np.float32)
 
-        # Extra
-        rays = batoid.RayVector.fromStop(
-            np.array(pupil_x),
-            np.array(pupil_y),
-            theta_x=np.deg2rad(corner[0]),
-            theta_y=np.deg2rad(corner[1]),
-            optic=extra,
-            wavelength=ssh.wavelength,
-        )
-        frays = extra.trace(rays.copy())
-        prays = perturbed_ex.trace(rays.copy())
-        vignetted = frays.vignetted
+# Pack binary: spot_xy (micron, interleaved), Sx, Sy, field_xy (deg, interleaved)
+spot_xy = np.empty(2 * N, dtype=np.float32)
+spot_xy[0::2] = x0_flat
+spot_xy[1::2] = y0_flat
 
-        meandx = np.nanmean(prays.x - frays.x)
-        meandy = np.nanmean(prays.y - frays.y)
-
-        SXd[i+4, :, idof] = (prays.x - frays.x - meandx) / step
-        SYd[i+4, :, idof] = (prays.y - frays.y - meandy) / step
-        SXd[i+4, vignetted, idof] = np.nan
-        SYd[i+4, vignetted, idof] = np.nan
-
-        if idof == 0:
-            xd[i+4] = np.array(frays.x)
-            yd[i+4] = np.array(frays.y)
-            vignetted = frays.vignetted
-            xd[i+4][vignetted] = np.nan
-            yd[i+4][vignetted] = np.nan
-            xd[i+4] -= np.nanmean(xd[i+4])
-            yd[i+4] -= np.nanmean(yd[i+4])
-
-            xd[i+4] *= donut_factor
-            yd[i+4] *= donut_factor
-            dx = cdth * corner[0] + sdth * corner[1]
-            dy = -sdth * corner[0] + cdth * corner[1]
-            xd[i+4] += dx*1.4
-            yd[i+4] += dy*1.4
-
-        bar.update(1)
-
-SXd *= donut_factor
-SYd *= donut_factor
-
-x0 = x0.astype(np.float32).ravel()
-y0 = y0.astype(np.float32).ravel()
-
-xd = xd.astype(np.float32).ravel()
-yd = yd.astype(np.float32).ravel()
-
-Sx = Sx.astype(np.float32).reshape(-1, ssh.n_dof)
-Sy = Sy.astype(np.float32).reshape(-1, ssh.n_dof)
-
-SXd = SXd.astype(np.float32).reshape(-1, ssh.n_dof)
-SYd = SYd.astype(np.float32).reshape(-1, ssh.n_dof)
-
-zk0 = zk0.astype(np.float32)
-dzk = dzk.astype(np.float32)
-
-x0 = np.concatenate([x0, xd])
-y0 = np.concatenate([y0, yd])
-
-Sx = np.concatenate([Sx, SXd])
-Sy = np.concatenate([Sy, SYd])
-
-Sx = Sx.T
-Sy = Sy.T
-
-N = x0.shape[0]
-K = Sx.shape[0]
-ZK_CORNERS, ZK_TERMS = zk0.shape
-
-init = np.empty(2 * N, dtype=np.float32)
-init[0::2] = x0
-init[1::2] = y0
+field_xy = np.empty(2 * N, dtype=np.float32)
+field_xy[0::2] = field_x_flat
+field_xy[1::2] = field_y_flat
 
 sx_flat = Sx.ravel(order="C")
 sy_flat = Sy.ravel(order="C")
-zk0_flat = zk0.ravel(order="C")
-dzk_flat = dzk.ravel(order="C")
-wf_sens_flat = wf_sens.astype(np.float32).ravel(order="C")
 
-init_offset = 0
-sx_offset = init_offset + init.size
+donut_spot_xy = np.empty(2 * donut_N, dtype=np.float32)
+donut_spot_xy[0::2] = donut_x0_flat
+donut_spot_xy[1::2] = donut_y0_flat
+
+donut_field_xy = np.empty(2 * donut_N, dtype=np.float32)
+donut_field_xy[0::2] = donut_field_x_flat
+donut_field_xy[1::2] = donut_field_y_flat
+
+donut_sx_flat = donut_Sx.ravel(order="C")
+donut_sy_flat = donut_Sy.ravel(order="C")
+
+spot_offset = 0
+sx_offset = spot_offset + spot_xy.size
 sy_offset = sx_offset + sx_flat.size
-zk0_offset = sy_offset + sy_flat.size
-dzk_offset = zk0_offset + zk0_flat.size
-sens_offset = dzk_offset + dzk_flat.size
+field_offset = sy_offset + sy_flat.size
 
-packed = np.concatenate([init, sx_flat, sy_flat, zk0_flat, dzk_flat, wf_sens_flat])
+donut_spot_offset = field_offset + field_xy.size
+donut_sx_offset = donut_spot_offset + donut_spot_xy.size
+donut_sy_offset = donut_sx_offset + donut_sx_flat.size
+donut_field_offset = donut_sy_offset + donut_sy_flat.size
+
+zk0_offset = donut_field_offset + donut_field_xy.size
+dzk_offset = zk0_offset + zk0_flat.size
+range_weights_flat = range_weights.astype(np.float32).ravel(order="C")
+fwhm_weights_flat = fwhm_weights.astype(np.float32).ravel(order="C")
+wf_sens_flat = wf_sens_matrix.ravel(order="C")
+
+range_weights_offset = dzk_offset + dzk_flat.size
+fwhm_weights_offset = range_weights_offset + range_weights_flat.size
+wf_sens_offset = fwhm_weights_offset + fwhm_weights_flat.size
+
+packed = np.concatenate([
+    spot_xy,
+    sx_flat,
+    sy_flat,
+    field_xy,
+    donut_spot_xy,
+    donut_sx_flat,
+    donut_sy_flat,
+    donut_field_xy,
+    zk0_flat,
+    dzk_flat,
+    range_weights_flat,
+    fwhm_weights_flat,
+    wf_sens_flat,
+])
 packed.tofile("model.f32")
 
-WF_SENS_ROWS, WF_SENS_COLS = wf_sens.shape
-
 meta = {
-    "version": 3,
+    "version": 7,
     "dtype": "float32",
     "N": int(N),
-    "K": int(K),
-    "norm": norm.tolist(),
-    "default_use_dof": [int(v) for v in ssh.use_dof.tolist()],
-    "default_nkeep": int(ssh.nkeep),
+    "K": int(K_dof),
+    "donut_N": int(donut_N),
+    "donut_nfield_intra": int(donut_intra_x0.shape[0]),
+    "donut_nfield_extra": int(donut_extra_x0.shape[0]),
+    "donut_nray": int(donut_nray),
+    "donut_clock_angle_deg": 10.0,
+    "donut_clock_radius_scale": 1.4,
     "layout": {
-        "init_xy": {"offset_f32": int(init_offset), "length_f32": int(init.size), "encoding": "xy_interleaved"},
-        "Sx": {"offset_f32": int(sx_offset), "length_f32": int(sx_flat.size), "shape": [int(K), int(N)], "order": "C"},
-        "Sy": {"offset_f32": int(sy_offset), "length_f32": int(sy_flat.size), "shape": [int(K), int(N)], "order": "C"},
-        "zk0": {"offset_f32": int(zk0_offset), "length_f32": int(zk0_flat.size), "shape": [int(ZK_CORNERS), int(ZK_TERMS)], "order": "C"},
-        "dzk": {"offset_f32": int(dzk_offset), "length_f32": int(dzk_flat.size), "shape": [int(ZK_CORNERS), int(ZK_TERMS), int(K)], "order": "C"},
-        "wf_sens": {"offset_f32": int(sens_offset), "length_f32": int(wf_sens_flat.size), "shape": [int(WF_SENS_ROWS), int(WF_SENS_COLS)], "order": "C"}
-    }
+        "spot_xy": {
+            "offset_f32": int(spot_offset),
+            "length_f32": int(spot_xy.size),
+            "encoding": "xy_interleaved",
+        },
+        "Sx": {
+            "offset_f32": int(sx_offset),
+            "length_f32": int(sx_flat.size),
+            "shape": [int(K_dof), int(N)],
+            "order": "C",
+        },
+        "Sy": {
+            "offset_f32": int(sy_offset),
+            "length_f32": int(sy_flat.size),
+            "shape": [int(K_dof), int(N)],
+            "order": "C",
+        },
+        "field_xy": {
+            "offset_f32": int(field_offset),
+            "length_f32": int(field_xy.size),
+            "encoding": "xy_interleaved",
+        },
+        "donut_spot_xy": {
+            "offset_f32": int(donut_spot_offset),
+            "length_f32": int(donut_spot_xy.size),
+            "encoding": "xy_interleaved",
+        },
+        "donut_Sx": {
+            "offset_f32": int(donut_sx_offset),
+            "length_f32": int(donut_sx_flat.size),
+            "shape": [int(K_dof), int(donut_N)],
+            "order": "C",
+        },
+        "donut_Sy": {
+            "offset_f32": int(donut_sy_offset),
+            "length_f32": int(donut_sy_flat.size),
+            "shape": [int(K_dof), int(donut_N)],
+            "order": "C",
+        },
+        "donut_field_xy": {
+            "offset_f32": int(donut_field_offset),
+            "length_f32": int(donut_field_xy.size),
+            "encoding": "xy_interleaved",
+        },
+        "zk0": {
+            "offset_f32": int(zk0_offset),
+            "length_f32": int(zk0_flat.size),
+            "shape": [int(ZK_CORNERS), int(ZK_TERMS)],
+            "order": "C",
+            "units": "nm",
+        },
+        "dzk": {
+            "offset_f32": int(dzk_offset),
+            "length_f32": int(dzk_flat.size),
+            "shape": [int(ZK_CORNERS), int(ZK_TERMS), int(K_dof)],
+            "order": "C",
+            "units": "nm_per_dof_unit",
+        },
+        "range_weights": {
+            "offset_f32": int(range_weights_offset),
+            "length_f32": int(range_weights_flat.size),
+            "shape": [int(range_weights_flat.size)],
+            "order": "C",
+            "units": "f_basis",
+        },
+        "fwhm_weights": {
+            "offset_f32": int(fwhm_weights_offset),
+            "length_f32": int(fwhm_weights_flat.size),
+            "shape": [int(fwhm_weights_flat.size)],
+            "order": "C",
+            "units": "f_basis",
+        },
+        "wf_sens": {
+            "offset_f32": int(wf_sens_offset),
+            "length_f32": int(wf_sens_flat.size),
+            "shape": [int(WF_SENS_ROWS), int(WF_SENS_COLS)],
+            "order": "C",
+            "units": "dz_per_f_basis",
+        },
+    },
 }
+
 with open("model_meta.json", "w") as f:
     json.dump(meta, f, indent=2)
+
