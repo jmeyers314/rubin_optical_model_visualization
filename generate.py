@@ -329,6 +329,8 @@ meta = {
             "offset_f32": int(wf_sens_offset),
             "length_f32": int(wf_sens_flat.size),
             "shape": [int(WF_SENS_ROWS), int(WF_SENS_COLS)],
+            "n_field_dz": int(sensitivity.shape[0]),
+            "n_pupil_zk": int(sensitivity.shape[1]),
             "order": "C",
             "units": "dz_per_f_basis",
         },

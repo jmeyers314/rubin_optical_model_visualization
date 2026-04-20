@@ -46,6 +46,8 @@ const DEFAULT_RANGE_NORM_EXP = 1.0;
 const DEFAULT_FWHM_NORM_EXP = 1.0;
 const DEFAULT_USE_DOF = '0-16,30-34';
 const DEFAULT_NKEEP = 12;
+const DEFAULT_DZ_FIELD_MAX = 3;
+const ENABLE_DZ_SENS_PLOT = true;
 
 let p = new Float32Array(K);
 let scienceN = 0;
@@ -73,6 +75,7 @@ let rangeNormExp = DEFAULT_RANGE_NORM_EXP;
 let fwhmNormExp = DEFAULT_FWHM_NORM_EXP;
 let wfSens = null;        // Float32Array — wavefront sensitivity matrix (nObs × K)
 let wfSensRows = 0;       // number of observation rows in wfSens
+let wfSensNPupilZk = 0;   // number of pupil Zernike terms in each row of wfSens
 let currentUseDof = [];   // Int array of active DOF indices
 let currentNkeep = DEFAULT_NKEEP;
 let Vh = null;            // Float64Array — (nkeep × nActive) mixing matrix
@@ -552,6 +555,7 @@ async function loadPackedModel(metaUrl, modelUrl) {
     fwhmWeights: loadedFwhmWeights,
     wfSens: loadedWfSens,
     wfSensRows: wfRows,
+    wfSensNPupilZk: (wfSensSpec && wfSensSpec.n_pupil_zk) ? Number(wfSensSpec.n_pupil_zk) : 0,
     zk0: loadedZk0,
     dzk: loadedDzk,
     zkCorners,
@@ -696,12 +700,14 @@ function initModel(model) {
   fwhmWeights = null;
   wfSens = null;
   wfSensRows = 0;
+  wfSensNPupilZk = 0;
   if (model.rangeWeights && model.fwhmWeights && model.wfSens) {
     if (model.rangeWeights.length === K && model.fwhmWeights.length === K && model.wfSens.length > 0) {
       rangeWeights = new Float64Array(model.rangeWeights);
       fwhmWeights = new Float64Array(model.fwhmWeights);
       wfSens = model.wfSens;
       wfSensRows = Number(model.wfSensRows) || 0;
+      wfSensNPupilZk = Number(model.wfSensNPupilZk) || 0;
     }
   }
 
@@ -779,6 +785,7 @@ const copyDiagnosticsStatusEl = document.getElementById('copy-diagnostics-status
 const zoomInBtn = document.getElementById('zoom-in');
 const zoomOutBtn = document.getElementById('zoom-out');
 const zoomResetBtn = document.getElementById('zoom-reset');
+const dzFieldMaxInputEl = document.getElementById('dz-field-max-input');
 const SCALE_BAR_WORLD_UNITS = 0.1;
 const GRID_PITCH_WORLD_UNITS = 0.048;
 const GRID_MAJOR_EVERY = 5;
@@ -1426,6 +1433,7 @@ function rebuildVmodeUI() {
   vValues = new Array(currentNkeep).fill(0);
   buildVmodeSliders();
   drawMixingMatrix();
+  drawDzSensPlot();
 }
 
 function buildVmodeSliders() {
@@ -1610,13 +1618,14 @@ function drawMixingMatrix() {
   }
 
   const CELL = 14;
+  const LEFT_PAD = 18;
   const LABEL_W = 75;
-  const BOTTOM_H = 19;
+  const BOTTOM_H = 32;
   const TOP_PAD = 2;
   const nModes = nActive;
   const nDofs = nActive;
 
-  const canvasW = LABEL_W + nModes * CELL;
+  const canvasW = LEFT_PAD + LABEL_W + nModes * CELL;
   const canvasH = TOP_PAD + nDofs * CELL + BOTTOM_H;
 
   const dpr = window.devicePixelRatio || 1;
@@ -1650,15 +1659,15 @@ function drawMixingMatrix() {
     for (let j = 0; j < nDofs; j++) {
       const val = normMix[mode * nActive + j];
       ctx.fillStyle = bwrColor(val / vmax);
-      ctx.fillRect(LABEL_W + mode * CELL, TOP_PAD + (nDofs - 1 - j) * CELL, CELL, CELL);
+      ctx.fillRect(LEFT_PAD + LABEL_W + mode * CELL, TOP_PAD + (nDofs - 1 - j) * CELL, CELL, CELL);
     }
   }
 
-  // Red overlay for modes beyond nkeep
+  // Grey overlay for modes beyond nkeep so it stays distinct from the value colormap.
   if (currentNkeep < nModes) {
-    ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
+    ctx.fillStyle = 'rgba(120, 120, 120, 0.45)';
     ctx.fillRect(
-      LABEL_W + currentNkeep * CELL, TOP_PAD,
+      LEFT_PAD + LABEL_W + currentNkeep * CELL, TOP_PAD,
       (nModes - currentNkeep) * CELL, nDofs * CELL
     );
   }
@@ -1670,8 +1679,8 @@ function drawMixingMatrix() {
   for (const bIdx of bounds) {
     const y = TOP_PAD + (nDofs - 1 - bIdx) * CELL;
     ctx.beginPath();
-    ctx.moveTo(LABEL_W, y);
-    ctx.lineTo(LABEL_W + nModes * CELL, y);
+    ctx.moveTo(LEFT_PAD + LABEL_W, y);
+    ctx.lineTo(LEFT_PAD + LABEL_W + nModes * CELL, y);
     ctx.stroke();
   }
 
@@ -1684,7 +1693,163 @@ function drawMixingMatrix() {
     const dofIdx = currentUseDof[j];
     const full = CONTROL_NAMES[dofIdx] || ('DOF ' + dofIdx);
     const name = full.replace(/\s*\[.*\]$/, '');
-    ctx.fillText(name, LABEL_W - 3, TOP_PAD + (nDofs - 1 - j) * CELL + CELL / 2);
+    ctx.fillText(name, LEFT_PAD + LABEL_W - 3, TOP_PAD + (nDofs - 1 - j) * CELL + CELL / 2);
+  }
+
+  // X-axis labels (mode numbers)
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  for (let m = 0; m < nModes; m++) {
+    ctx.fillText(String(m + 1), LEFT_PAD + LABEL_W + m * CELL + CELL / 2, TOP_PAD + nDofs * CELL + 2);
+  }
+
+  ctx.font = '10px ui-sans-serif, system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('Vmode', LEFT_PAD + LABEL_W + (nModes * CELL) / 2, TOP_PAD + nDofs * CELL + 16);
+
+  ctx.save();
+  ctx.translate(8, TOP_PAD + (nDofs * CELL) / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('DOF', 0, 0);
+  ctx.restore();
+}
+
+function getDzFieldMax() {
+  const maxAvailable = wfSensNPupilZk > 0
+    ? Math.max(1, Math.floor((wfSensRows - 1) / wfSensNPupilZk))
+    : DEFAULT_DZ_FIELD_MAX;
+
+  if (!dzFieldMaxInputEl) {
+    return Math.min(DEFAULT_DZ_FIELD_MAX, maxAvailable);
+  }
+
+  const parsed = Math.trunc(Number(dzFieldMaxInputEl.value));
+  const requested = Number.isFinite(parsed) ? parsed : DEFAULT_DZ_FIELD_MAX;
+  const clamped = Math.max(1, Math.min(maxAvailable, requested));
+  dzFieldMaxInputEl.value = String(clamped);
+  return clamped;
+}
+
+function drawDzSensPlot() {
+  const canvas = document.getElementById('dz-sens-canvas');
+  if (!canvas) return;
+
+  if (!ENABLE_DZ_SENS_PLOT) {
+    canvas.width = 0;
+    canvas.height = 0;
+    canvas.style.width = '0';
+    canvas.style.height = '0';
+    return;
+  }
+
+  if (!fullMixMatrix || !wfSens || nActive <= 0 || wfSensNPupilZk <= 0 || currentNkeep <= 0) {
+    canvas.width = 0;
+    canvas.height = 0;
+    canvas.style.width = '0';
+    canvas.style.height = '0';
+    return;
+  }
+
+  // DZ rows of interest: field DZs 1,2,3 × pupil Zernikes 4..11.
+  // The packed sensitivity tensor preserves these as direct indices,
+  // so (1, 4) maps to sensitivity[1, 4, :], not [0, 3, :].
+  const fieldMax = getDzFieldMax();
+  const FIELD_DZS = Array.from({length: fieldMax}, (_, index) => index + 1);
+  const PUPIL_ZKS = [4, 5, 6, 7, 8, 9, 10, 11];
+
+  const dzFlatRows = [];
+  const dzLabels = [];
+  for (const fdz of FIELD_DZS) {
+    for (const pzk of PUPIL_ZKS) {
+      dzFlatRows.push(fdz * wfSensNPupilZk + pzk);
+      dzLabels.push(`(${fdz}, ${pzk})`);
+    }
+  }
+
+  const nRows = dzFlatRows.length;
+  const nModes = nActive;
+
+  // Compute projection: proj[i, m] = sum_j wfSens[flatRow * K + useDof[j]] * fullMixMatrix[m * nActive + j]
+  const proj = new Float64Array(nRows * nModes);
+  for (let i = 0; i < nRows; i++) {
+    const sensOff = dzFlatRows[i] * K;
+    for (let m = 0; m < nModes; m++) {
+      let val = 0;
+      const mixOff = m * nActive;
+      for (let j = 0; j < nActive; j++) {
+        val += wfSens[sensOff + currentUseDof[j]] * fullMixMatrix[mixOff + j];
+      }
+      proj[i * nModes + m] = val;
+    }
+  }
+
+  const columnMax = new Float64Array(nModes);
+  for (let m = 0; m < nModes; m++) {
+    let vmax = 0;
+    for (let i = 0; i < nRows; i++) {
+      vmax = Math.max(vmax, Math.abs(proj[i * nModes + m]));
+    }
+    columnMax[m] = vmax < 1e-15 ? 1 : vmax;
+  }
+
+  const CELL = 14;
+  const LEFT_PAD = 18;
+  const LABEL_W = 75;
+  const BOTTOM_H = 32;
+  const TOP_PAD = 2;
+
+  const canvasW = LEFT_PAD + LABEL_W + nModes * CELL;
+  const canvasH = TOP_PAD + nRows * CELL + BOTTOM_H;
+
+  const dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.ceil(canvasW * dpr);
+  canvas.height = Math.ceil(canvasH * dpr);
+  canvas.style.width = canvasW + 'px';
+  canvas.style.height = canvasH + 'px';
+
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, canvasW, canvasH);
+
+  // Draw cells with row index 0 at top.
+  for (let i = 0; i < nRows; i++) {
+    for (let m = 0; m < nModes; m++) {
+      ctx.fillStyle = bwrColor(proj[i * nModes + m] / columnMax[m]);
+      ctx.fillRect(LEFT_PAD + LABEL_W + m * CELL, TOP_PAD + i * CELL, CELL, CELL);
+    }
+  }
+
+  // Grey overlay for modes beyond nkeep so it stays distinct from the value colormap.
+  if (currentNkeep < nModes) {
+    ctx.fillStyle = 'rgba(120, 120, 120, 0.45)';
+    ctx.fillRect(
+      LEFT_PAD + LABEL_W + currentNkeep * CELL, TOP_PAD,
+      (nModes - currentNkeep) * CELL, nRows * CELL
+    );
+  }
+
+  // Separator lines between field DZ groups
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.3)';
+  ctx.lineWidth = 1;
+  for (let g = 1; g < FIELD_DZS.length; g++) {
+    const sepIdx = g * PUPIL_ZKS.length;
+    const y = TOP_PAD + sepIdx * CELL;
+    ctx.beginPath();
+    ctx.moveTo(LEFT_PAD + LABEL_W, y);
+    ctx.lineTo(LEFT_PAD + LABEL_W + nModes * CELL, y);
+    ctx.stroke();
+  }
+
+  // Y-axis labels
+  ctx.fillStyle = '#333';
+  ctx.font = '8px ui-monospace, Menlo, monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let i = 0; i < nRows; i++) {
+    ctx.fillText(dzLabels[i], LEFT_PAD + LABEL_W - 3, TOP_PAD + i * CELL + CELL / 2);
   }
 
   // X-axis labels (mode numbers)
@@ -1693,8 +1858,21 @@ function drawMixingMatrix() {
   const xStep = nModes > 30 ? 5 : (nModes > 15 ? 2 : 1);
   for (let m = 0; m < nModes; m++) {
     if (m % xStep !== 0 && m !== nModes - 1) continue;
-    ctx.fillText(String(m + 1), LABEL_W + m * CELL + CELL / 2, TOP_PAD + nDofs * CELL + 2);
+    ctx.fillText(String(m + 1), LEFT_PAD + LABEL_W + m * CELL + CELL / 2, TOP_PAD + nRows * CELL + 2);
   }
+
+  ctx.font = '10px ui-sans-serif, system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('Vmode', LEFT_PAD + LABEL_W + (nModes * CELL) / 2, TOP_PAD + nRows * CELL + 16);
+
+  ctx.save();
+  ctx.translate(8, TOP_PAD + (nRows * CELL) / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('Double Zernike', 0, 0);
+  ctx.restore();
 }
 
 async function start() {
@@ -1815,6 +1993,13 @@ if (nkeepInputEl) {
     if (e.key === 'Enter') { e.preventDefault(); recomputeVmodes(); }
     if (e.key === 'Escape') { e.preventDefault(); nkeepInputEl.blur(); }
   });
+}
+if (dzFieldMaxInputEl) {
+  dzFieldMaxInputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); drawDzSensPlot(); }
+    if (e.key === 'Escape') { e.preventDefault(); dzFieldMaxInputEl.blur(); }
+  });
+  dzFieldMaxInputEl.addEventListener('change', drawDzSensPlot);
 }
 
 vis.addEventListener('mousemove', updateMouseCoords);

@@ -75,6 +75,14 @@
       border-radius: 4px;
       background: #fff;
     }
+    #dz-sens-canvas {
+      display: block;
+      margin-top: 8px;
+      max-width: 100%;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: #fff;
+    }
     .zernike-overlay {
       position: absolute;
       inset: 0;
@@ -288,6 +296,12 @@
         </div>
         <div id="vmode-sliders"></div>
         <canvas id="mixing-matrix-canvas" aria-label="V-mode mixing matrix"></canvas>
+        <div class="row">
+          <label>Max field</label>
+          <input id="dz-field-max-input" type="number" min="1" value="3">
+          <span></span>
+        </div>
+        <canvas id="dz-sens-canvas" aria-label="DZ sensitivity per V-mode"></canvas>
       </div>
     </div>
   </div>
