@@ -42,6 +42,10 @@ const SPOT_SCALE = 3e-3;
 const DONUT_SPOT_SCALE = 5e-4;
 const ARCSEC_PER_DEGREE = 3600;
 const ANGULAR_DOF_INDICES = new Set([3, 4, 8, 9]);
+const DEFAULT_RANGE_NORM_EXP = 1.0;
+const DEFAULT_FWHM_NORM_EXP = 1.0;
+const DEFAULT_USE_DOF = '0-16,30-34';
+const DEFAULT_NKEEP = 12;
 
 let p = new Float32Array(K);
 let scienceN = 0;
@@ -65,12 +69,12 @@ let data = [];
 let norm = null;          // Float64Array(K) — normalization weights
 let rangeWeights = null;  // Float64Array(K)
 let fwhmWeights = null;   // Float64Array(K)
-let rangeNormExp = 1.0;
-let fwhmNormExp = 1.0;
+let rangeNormExp = DEFAULT_RANGE_NORM_EXP;
+let fwhmNormExp = DEFAULT_FWHM_NORM_EXP;
 let wfSens = null;        // Float32Array — wavefront sensitivity matrix (nObs × K)
 let wfSensRows = 0;       // number of observation rows in wfSens
 let currentUseDof = [];   // Int array of active DOF indices
-let currentNkeep = 12;
+let currentNkeep = DEFAULT_NKEEP;
 let Vh = null;            // Float64Array — (nkeep × nActive) mixing matrix
 let fullMixMatrix = null; // Float64Array — (nActive × nActive) full eigenvector matrix
 let nActive = 0;          // len(currentUseDof)
@@ -1353,6 +1357,11 @@ function buildSliders() {
 }
 
 function resetControls() {
+  const rangeExpInput = document.getElementById('range-exp-input');
+  const fwhmExpInput = document.getElementById('fwhm-exp-input');
+  const useDofInput = document.getElementById('use-dof-input');
+  const nkeepInput = document.getElementById('nkeep-input');
+
   for (let k = 0; k < K; k++) {
     p[k] = 0;
     if (sliderInputs[k]) sliderInputs[k].value = '0';
@@ -1363,7 +1372,16 @@ function resetControls() {
     if (vmodeSliderInputs[m]) vmodeSliderInputs[m].value = '0';
     if (vmodeParamInputs[m]) vmodeParamInputs[m].value = formatControlValue(0);
   }
-  requestUpdate();
+
+  rangeNormExp = DEFAULT_RANGE_NORM_EXP;
+  fwhmNormExp = DEFAULT_FWHM_NORM_EXP;
+  currentNkeep = DEFAULT_NKEEP;
+  if (rangeExpInput) rangeExpInput.value = String(DEFAULT_RANGE_NORM_EXP);
+  if (fwhmExpInput) fwhmExpInput.value = String(DEFAULT_FWHM_NORM_EXP);
+  if (useDofInput) useDofInput.value = DEFAULT_USE_DOF;
+  if (nkeepInput) nkeepInput.value = String(DEFAULT_NKEEP);
+
+  recomputeVmodes();
 }
 
 function buildNormVector() {
@@ -1386,8 +1404,8 @@ function recomputeVmodes() {
 
   const parsedRangeExp = Number(rangeExpInput.value);
   const parsedFwhmExp = Number(fwhmExpInput.value);
-  rangeNormExp = Number.isFinite(parsedRangeExp) ? parsedRangeExp : 1.0;
-  fwhmNormExp = Number.isFinite(parsedFwhmExp) ? parsedFwhmExp : 1.0;
+  rangeNormExp = Number.isFinite(parsedRangeExp) ? parsedRangeExp : DEFAULT_RANGE_NORM_EXP;
+  fwhmNormExp = Number.isFinite(parsedFwhmExp) ? parsedFwhmExp : DEFAULT_FWHM_NORM_EXP;
   rangeExpInput.value = String(rangeNormExp);
   fwhmExpInput.value = String(fwhmNormExp);
 
@@ -1398,7 +1416,7 @@ function recomputeVmodes() {
     currentNkeep = 0;
     nkeepInput.value = '0';
   } else {
-    currentNkeep = Math.max(1, Math.min(nActive, Number(nkeepInput.value) || 12));
+    currentNkeep = Math.max(1, Math.min(nActive, Number(nkeepInput.value) || DEFAULT_NKEEP));
     nkeepInput.value = String(currentNkeep);
   }
 
