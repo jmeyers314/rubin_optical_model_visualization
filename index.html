@@ -86,6 +86,14 @@
       border-radius: 4px;
       background: #fff;
     }
+    #dz-vmode-canvas {
+      display: block;
+      margin-top: 8px;
+      max-width: 100%;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: #fff;
+    }
     .zernike-overlay {
       position: absolute;
       inset: 0;
@@ -192,6 +200,9 @@
       height: 0;
       border-top: 2px solid #d7e7ff;
       width: 24px;
+    }
+    .scale-bar-group-gap {
+      margin-top: 6px;
     }
     .loading-overlay {
       position: absolute;
@@ -310,6 +321,12 @@
           <span></span>
         </div>
         <canvas id="dz-sens-canvas" aria-label="DZ sensitivity per V-mode"></canvas>
+        <div class="row">
+          <label>Show vmode</label>
+          <select id="dz-vmode-select"></select>
+          <span></span>
+        </div>
+        <canvas id="dz-vmode-canvas" aria-label="Double Zernike matrix for selected V-mode"></canvas>
       </div>
     </div>
   </div>
@@ -337,7 +354,11 @@
     </div>
     <div class="scale-bar" aria-hidden="true">
       <div id="scale-bar-line" class="scale-bar-line"></div>
-      <div>0.1 deg</div>
+      <div>0.1 deg (field)</div>
+      <div id="scale-bar-spot-line" class="scale-bar-line scale-bar-group-gap"></div>
+      <div id="scale-bar-spot-label">— px (spot)</div>
+      <div id="scale-bar-donut-line" class="scale-bar-line scale-bar-group-gap"></div>
+      <div id="scale-bar-donut-label">— px (donut)</div>
     </div>
   </div>
 

@@ -38,6 +38,9 @@ const DONUT_CORNERS = 4;
 const DONUT_ZERNIKE_TERMS = 29;
 const WHEEL_ZOOM_SENSITIVITY = 0.0008;
 const WHEEL_ZOOM_MAX_STEP = 0.12;
+const MICRONS_PER_PIXEL = 10;   // LSST detector pixel size
+const SCALE_BAR_SPOT_PIXELS = 10;   // spot scale bar size in detector pixels
+const SCALE_BAR_DONUT_PIXELS = 50;  // donut scale bar size in detector pixels
 const SPOT_SCALE = 3e-3;
 const DONUT_SPOT_SCALE = 5e-4;
 const ARCSEC_PER_DEGREE = 3600;
@@ -831,6 +834,10 @@ const resetControlsBtn = document.getElementById('reset-controls');
 const includeIntrinsicsCheckbox = document.getElementById('include-intrinsics');
 const mouseCoordsEl = document.getElementById('mouse-coords');
 const scaleBarLineEl = document.getElementById('scale-bar-line');
+const scaleBarSpotLineEl = document.getElementById('scale-bar-spot-line');
+const scaleBarSpotLabelEl = document.getElementById('scale-bar-spot-label');
+const scaleBarDonutLineEl = document.getElementById('scale-bar-donut-line');
+const scaleBarDonutLabelEl = document.getElementById('scale-bar-donut-label');
 const loadingOverlayEl = document.getElementById('loading-overlay');
 const loadingFillEl = document.getElementById('loading-fill');
 const loadingTextEl = document.getElementById('loading-text');
@@ -1276,10 +1283,30 @@ function drawGrid(width, height) {
 }
 
 function updateScaleBar() {
-  if (!scaleBarLineEl) return;
   const pxPerWorldUnit = Math.pow(2, currentViewState.zoom);
-  const widthPx = Math.max(1, SCALE_BAR_WORLD_UNITS * pxPerWorldUnit);
-  scaleBarLineEl.style.width = `${widthPx.toFixed(1)}px`;
+
+  if (scaleBarLineEl) {
+    const widthPx = Math.max(1, SCALE_BAR_WORLD_UNITS * pxPerWorldUnit);
+    scaleBarLineEl.style.width = `${widthPx.toFixed(1)}px`;
+  }
+
+  if (scaleBarSpotLineEl) {
+    const spotWorldUnits = SCALE_BAR_SPOT_PIXELS * MICRONS_PER_PIXEL * spotScale;
+    const widthPx = Math.max(1, spotWorldUnits * pxPerWorldUnit);
+    scaleBarSpotLineEl.style.width = `${widthPx.toFixed(1)}px`;
+  }
+  if (scaleBarSpotLabelEl) {
+    scaleBarSpotLabelEl.textContent = `${SCALE_BAR_SPOT_PIXELS} px (spot)`;
+  }
+
+  if (scaleBarDonutLineEl) {
+    const donutWorldUnits = SCALE_BAR_DONUT_PIXELS * MICRONS_PER_PIXEL * donutSpotScale;
+    const widthPx = Math.max(1, donutWorldUnits * pxPerWorldUnit);
+    scaleBarDonutLineEl.style.width = `${widthPx.toFixed(1)}px`;
+  }
+  if (scaleBarDonutLabelEl) {
+    scaleBarDonutLabelEl.textContent = `${SCALE_BAR_DONUT_PIXELS} px (donut)`;
+  }
 }
 
 function updateMouseCoords(event) {
@@ -1502,8 +1529,27 @@ function recomputeVmodes() {
 function rebuildVmodeUI() {
   vValues = new Array(currentNkeep).fill(0);
   buildVmodeSliders();
+  rebuildVmodeDropdown();
   drawMixingMatrix();
   drawDzSensPlot();
+  drawDzVmodePlot();
+}
+
+function rebuildVmodeDropdown() {
+  const selectEl = document.getElementById('dz-vmode-select');
+  if (!selectEl) return;
+  const prevValue = Number(selectEl.value) || 0;
+  selectEl.innerHTML = '';
+  const count = currentNkeep > 0 ? currentNkeep : nActive;
+  for (let m = 0; m < count; m++) {
+    const opt = document.createElement('option');
+    opt.value = String(m);
+    opt.textContent = `V${m + 1}`;
+    selectEl.appendChild(opt);
+  }
+  // Restore previous selection if still valid
+  const clampedPrev = Math.max(0, Math.min(count - 1, prevValue));
+  selectEl.value = String(clampedPrev);
 }
 
 function buildVmodeSliders() {
@@ -2018,6 +2064,122 @@ function drawDzSensPlot() {
   ctx.restore();
 }
 
+function drawDzVmodePlot() {
+  const canvas = document.getElementById('dz-vmode-canvas');
+  if (!canvas) return;
+
+  if (!fullMixMatrix || !wfSens || nActive <= 0 || wfSensNPupilZk <= 0 || currentNkeep <= 0) {
+    hideCanvas(canvas);
+    return;
+  }
+
+  const selectEl = document.getElementById('dz-vmode-select');
+  const selectedMode = selectEl ? Math.max(0, Math.min(nActive - 1, Number(selectEl.value) || 0)) : 0;
+
+  // Fixed ranges independent of the field/pupil max controls
+  const FIELD_DZS = Array.from({length: 15}, (_, i) => i + 1);  // k = 1..15
+  const PUPIL_ZKS = Array.from({length: 25}, (_, i) => i + 4);  // j = 4..28
+
+  const nK = FIELD_DZS.length;
+  const nJ = PUPIL_ZKS.length;
+
+  // Clamp to available data
+  const availK = Math.min(nK, wfSensNFieldDz > 0 ? wfSensNFieldDz - 1 : nK);
+  const availJ = Math.min(nJ, wfSensNPupilZk > 0 ? wfSensNPupilZk - 1 : nJ);
+
+  // Compute projection for only the selected mode: proj2d[ki * nJ + ji]
+  const proj2d = new Float64Array(nK * nJ);
+  const mixOff = selectedMode * nActive;
+  for (let ki = 0; ki < availK; ki++) {
+    const fdz = FIELD_DZS[ki];
+    for (let ji = 0; ji < availJ; ji++) {
+      const pzk = PUPIL_ZKS[ji];
+      const sensOff = (fdz * wfSensNPupilZk + pzk) * K;
+      let val = 0;
+      for (let j = 0; j < nActive; j++) {
+        val += wfSens[sensOff + currentUseDof[j]] * fullMixMatrix[mixOff + j];
+      }
+      proj2d[ki * nJ + ji] = val;
+    }
+  }
+
+  let vmax = 0;
+  for (let i = 0; i < proj2d.length; i++) {
+    vmax = Math.max(vmax, Math.abs(proj2d[i]));
+  }
+  if (vmax < 1e-15) vmax = 1;
+
+  const CELL = 14;
+  const LEFT_PAD = 18;
+  const LABEL_W = 32;
+  const TOP_PAD = 2;
+  const BOTTOM_H = 32;
+  const RIGHT_PAD = 8;
+
+  // rows = field DZ (k, k1 at top), cols = pupil ZK (j, j4 at left)
+  const canvasW = LEFT_PAD + LABEL_W + nJ * CELL + RIGHT_PAD;
+  const canvasH = TOP_PAD + nK * CELL + BOTTOM_H;
+  const ctx = setupHiDpiCanvas(canvas, canvasW, canvasH);
+
+  const plotLeft = LEFT_PAD + LABEL_W;
+  const plotTop = TOP_PAD;
+
+  // Draw cells: row=ki (field DZ k), col=ji (pupil ZK j)
+  for (let ki = 0; ki < nK; ki++) {
+    for (let ji = 0; ji < nJ; ji++) {
+      ctx.fillStyle = bwrColor(proj2d[ki * nJ + ji] / vmax);
+      ctx.fillRect(plotLeft + ji * CELL, plotTop + ki * CELL, CELL, CELL);
+    }
+  }
+
+  // Cell grid lines
+  ctx.strokeStyle = 'rgba(0,0,0,0.1)';
+  ctx.lineWidth = 0.5;
+  for (let ji = 0; ji <= nJ; ji++) {
+    ctx.beginPath();
+    ctx.moveTo(plotLeft + ji * CELL, plotTop);
+    ctx.lineTo(plotLeft + ji * CELL, plotTop + nK * CELL);
+    ctx.stroke();
+  }
+  for (let ki = 0; ki <= nK; ki++) {
+    ctx.beginPath();
+    ctx.moveTo(plotLeft, plotTop + ki * CELL);
+    ctx.lineTo(plotLeft + nJ * CELL, plotTop + ki * CELL);
+    ctx.stroke();
+  }
+
+  // Y-axis labels (field DZ k)
+  ctx.fillStyle = '#333';
+  ctx.font = '8px ui-monospace, Menlo, monospace';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  for (let ki = 0; ki < nK; ki++) {
+    ctx.fillText(String(FIELD_DZS[ki]), plotLeft - 3, plotTop + ki * CELL + CELL / 2);
+  }
+
+  // X-axis labels (pupil ZK j)
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  const xStep = nJ > 15 ? 2 : 1;
+  for (let ji = 0; ji < nJ; ji += xStep) {
+    ctx.fillText(String(PUPIL_ZKS[ji]), plotLeft + ji * CELL + CELL / 2, plotTop + nK * CELL + 2);
+  }
+
+  // Axis titles
+  ctx.font = '10px ui-sans-serif, system-ui, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('Pupil ZK (j)', plotLeft + (nJ * CELL) / 2, plotTop + nK * CELL + 16);
+
+  ctx.save();
+  ctx.translate(8, plotTop + (nK * CELL) / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'top';
+  ctx.fillText('Field DZ (k)', 0, 0);
+  ctx.restore();
+}
+
 async function start() {
   const startupStart = nowMs();
   loadTelemetry.startupStartIso = new Date().toISOString();
@@ -2119,10 +2281,13 @@ bindEnterEscapeInput(useDofInputEl, recomputeVmodes);
 bindEnterEscapeInput(nkeepInputEl, recomputeVmodes);
 
 bindEnterEscapeInput(dzFieldMaxInputEl, drawDzSensPlot);
-if (dzFieldMaxInputEl) dzFieldMaxInputEl.addEventListener('change', drawDzSensPlot);
+  if (dzFieldMaxInputEl) dzFieldMaxInputEl.addEventListener('change', drawDzSensPlot);
 
-bindEnterEscapeInput(dzPupilMaxInputEl, drawDzSensPlot);
-if (dzPupilMaxInputEl) dzPupilMaxInputEl.addEventListener('change', drawDzSensPlot);
+  bindEnterEscapeInput(dzPupilMaxInputEl, drawDzSensPlot);
+  if (dzPupilMaxInputEl) dzPupilMaxInputEl.addEventListener('change', drawDzSensPlot);
+
+const dzVmodeSelectEl = document.getElementById('dz-vmode-select');
+if (dzVmodeSelectEl) dzVmodeSelectEl.addEventListener('change', drawDzVmodePlot);
 
 vis.addEventListener('mousemove', updateMouseCoords);
 vis.addEventListener('mouseleave', clearMouseCoords);
